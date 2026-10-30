@@ -122,7 +122,13 @@ git submodule update --init --recursive
 make        # waylandbridge + host APK + module zip + anlandx tarball
 ```
 
-CI builds every push/PR and uploads the artifacts.
+Two things live outside the repo and are not auto-installed — a
+`wayland-scanner` built from the pinned fork, and a libffi release tarball
+overlaid on the submodule (the checkout ships no generated `configure`). Steps,
+proxies and troubleshooting are in [docs/build.md](docs/build.md).
+
+CI builds every push/PR and uploads the artifacts; a `v*` tag publishes a
+release with the APK, the AAR, the module zip and the session tarball.
 
 ## VR: SteamVR in an XR window
 

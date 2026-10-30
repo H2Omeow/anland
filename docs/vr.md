@@ -85,6 +85,47 @@ Keys, all optional apart from `xr_enabled`:
 panel looked at directly, leave them at `0` and the pass becomes a plain
 (then timewarped) blit.
 
+### Meta Quest 3S
+
+The Quest 3S is a two-panel Android device: 1832×1920 per eye, 90 Hz by
+default (120 Hz available), roughly 96°×90° per eye, 63 mm nominal IPD. Run
+anland on the headset itself, so the XR window *is* the display, and the panel
+is seen through Fresnel lenses — which means the barrel coefficients have to be
+non-zero, unlike the glasses case.
+
+```json
+{
+  "sc_enabled": 0,
+  "xr_enabled": 1,
+  "xr_mode": 2,
+  "xr_refresh": 90,
+  "xr_eye_w": 0,
+  "xr_eye_h": 0,
+  "xr_scale": 900,
+  "xr_fov": 96,
+  "xr_ipd": 63,
+  "xr_k1": 220,
+  "xr_k2": 40,
+  "xr_ca": 10
+}
+```
+
+- `xr_eye_w/h = 0` derives 1832×1920 from the panel; `xr_scale = 900` renders
+  slightly under native and lets the timewarp stretch do the rest — the first
+  knob to turn if `vrcompositor` reports late frames.
+- The `k1`/`k2` above are a starting point for the Q3S lens, not a measurement:
+  look at a straight grid (SteamVR's room outline or `steamvr.vrsettings`'
+  `driver_anland` test pattern) and raise `k1` until the edges stop bowing
+  outward. `xr_ca` trims the colour fringing that shows up at the rim.
+- Horizon OS hands raw IMU to VR apps through OpenXR, not to plain 2D
+  activities. If `./anland-steamvr status` shows a `seq` that keeps counting
+  while the quaternion stays at `0,0,0,1`, the headset is refusing the sensor:
+  set `xr_mode = 1` and use SteamVR's seated mode, or root the device far
+  enough to expose `SensorManager` to the host APK. Everything else (SBS
+  output, distortion, controllers) works either way.
+- Root is a hard requirement in any case: `anland` is a KernelSU/SukiSU module
+  plus a binder daemon in the `awl_daemon` domain.
+
 Then, inside the container:
 
 ```sh

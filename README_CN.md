@@ -112,7 +112,13 @@ git submodule update --init --recursive
 make        # waylandbridge + 宿主 APK + 模块 zip + anlandx 压缩包
 ```
 
-CI 会在每次 push/PR 时构建并上传产物。
+有两样东西不在仓库里、也不会自动安装：一是用仓库锁定的 wayland fork 自己构建的
+`wayland-scanner`，二是覆盖到 submodule 上的 libffi release tarball（git checkout
+里没有生成的 `configure`）。完整步骤、代理设置和常见错误见
+[docs/build.md](docs/build.md)。
+
+CI 会在每次 push/PR 时构建并上传产物；打 `v*` 标签则会发布 Release，附带 APK、
+AAR、模块 zip 和会话压缩包。
 
 ## VR：在 XR 窗口里跑 SteamVR
 
