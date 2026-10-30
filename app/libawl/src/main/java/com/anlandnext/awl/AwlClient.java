@@ -38,6 +38,8 @@ final class AwlClient {
     static final int T_SUBSCRIBE = 16;   /* (eventBinder) → ok: window lifecycle events */
     static final int T_UNSUBSCRIBE = 17; /* (eventBinder) → ok: stop events */
     static final int T_CONNECT = 18;     /* (fd) → ok: wayland connection over binder */
+    static final int T_XR_POSE = 19;  /* head pose from AwlXrSession (ONEWAY hot path, ~90 Hz) */
+    static final int T_XR_INPUT = 20; /* controller state from AwlXrSession (ONEWAY, ~60 Hz) */
 
     /* Event codes on the event binder (match the daemon's AWL_E_*) */
     static final int E_CREATED = 1;
@@ -134,6 +136,50 @@ final class AwlClient {
             d.writeLong(id);
             d.writeLong(host);
             b.transact(T_PAUSE, d, null, IBinder.FLAG_ONEWAY);
+        } catch (Exception e) {
+            s = null;
+        } finally {
+            d.recycle();
+        }
+    }
+
+    /** Head pose push (ONEWAY, ~90 Hz): quat = sensor-to-world rotation
+     *  [x,y,z,w], pos in metres (0 for 3DoF), sampleNs = SensorEvent.timestamp,
+     *  periodNs = the sensor's reported period (0 when unknown). */
+    static void xrPose(long id, float qx, float qy, float qz, float qw,
+                       float px, float py, float pz, long sampleNs, int periodNs) {
+        IBinder b = get();
+        if (b == null) return;
+        Parcel d = Parcel.obtain();
+        try {
+            d.writeInterfaceToken(DESCRIPTOR);
+            d.writeLong(id);
+            d.writeFloat(qx); d.writeFloat(qy); d.writeFloat(qz); d.writeFloat(qw);
+            d.writeFloat(px); d.writeFloat(py); d.writeFloat(pz);
+            d.writeLong(sampleNs);
+            d.writeInt(periodNs);
+            b.transact(T_XR_POSE, d, null, IBinder.FLAG_ONEWAY);
+        } catch (Exception e) {
+            s = null;
+        } finally {
+            d.recycle();
+        }
+    }
+
+    /** Controller state push (ONEWAY). Layout: n, then n ints —
+     *  per controller 9: present, buttons, trigger, grip, stickX, stickY,
+     *  trackpadX, trackpadY, padPressed (floats as ×10000 ints, see
+     *  awl_xr_set_input in the daemon). */
+    static void xrInput(long id, int[] vals, int n) {
+        IBinder b = get();
+        if (b == null) return;
+        Parcel d = Parcel.obtain();
+        try {
+            d.writeInterfaceToken(DESCRIPTOR);
+            d.writeLong(id);
+            d.writeInt(n);
+            for (int i = 0; i < n; i++) d.writeInt(vals[i]);
+            b.transact(T_XR_INPUT, d, null, IBinder.FLAG_ONEWAY);
         } catch (Exception e) {
             s = null;
         } finally {

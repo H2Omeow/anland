@@ -97,6 +97,12 @@ public class AwlWindowActivity extends Activity {
     private static final int C_ICON = 10;      /* (has:i32) toplevel icon applied/reset
                                                   → re-fetch the pixels and re-apply
                                                   the task description */
+    private static final int C_XR = 11;        /* (mode refresh eye_w eye_h fov_mdeg
+                                                  ipd_0_1mm:i32×6) this window is (or
+                                                  stopped being, mode=0) an XR
+                                                  window: run/stop head tracking and
+                                                  push pose+controllers; re-sent on
+                                                  every attach and XR config change */
     private static final int STATE_RESET = 0x1;   /* v1 reset → clear composing state + restartInput */
     private static final int CAPTURE_NONE = 0;
     private static final int CAPTURE_CONFINE = 1;
@@ -115,6 +121,9 @@ public class AwlWindowActivity extends Activity {
     private int lastW, lastH;
     private int lastImeMargin = -1;
     private boolean attached;
+    /* ---- XR (C_XR): head tracking + controller push for the XR-marked window ---- */
+    private AwlXrSession xr;      /* non-null once this window has been XR at least once */
+    private boolean xrWanted;     /* daemon says this window is an XR window */
     private boolean finishingByGone;   /* client closed the window / evicted, nothing left to report */
     private boolean deathLinked;       /* daemon death monitoring attached */
     private String taskTitle;          /* last known client title (Recents label) */
@@ -261,6 +270,15 @@ public class AwlWindowActivity extends Activity {
             if (code == C_ICON) {
                 data.readInt();   /* has flag — always re-fetch (reset ⇒ fetch returns none) */
                 applyTaskIconAsync();
+                return true;
+            }
+            if (code == C_XR) {
+                final int mode = data.readInt();
+                final int refresh = data.readInt();
+                final int eyeW = data.readInt(), eyeH = data.readInt();
+                final int fovMilli = data.readInt(), ipdTenth = data.readInt();
+                runOnUiThread(() -> applyXrState(mode, refresh, eyeW, eyeH,
+                                                 fovMilli, ipdTenth));
                 return true;
             }
             return super.onTransact(code, data, reply, flags);
@@ -668,6 +686,7 @@ public class AwlWindowActivity extends Activity {
     protected void onResume() {
         super.onResume();
         setupFullscreen();   /* the system may reset immersive mode */
+        if (xrWanted) startXr();   /* window was paused mid-VR: resume tracking */
         Awl.registerCallback(winEvents);
         Awl.acquire();   /* process event subscription (sibling windows dying while this one is foreground) */
         if (clipMgr != null)
@@ -692,6 +711,7 @@ public class AwlWindowActivity extends Activity {
             clipMgr.removePrimaryClipChangedListener(clipListener);
         setPointerCaptureMode(CAPTURE_NONE, 0, 0, 0, 0);   /* release + local mode reset (the daemon mirror survives; re-pushed on re-attach) */
         if (id >= 0) endPadStream();   /* the touchpad pointer stream may be interrupted by lifecycle: make up leave/button releases */
+        stopXr();   /* sensors off while hidden; the SURFACE re-attach re-pushes C_XR */
         /* treat as minimize: daemon full detach (rendering resources freed,
          * wayland window kept alive). Clear attached locally too —
          * onResume/surfaceChanged re-attach from there */
@@ -1717,6 +1737,10 @@ public class AwlWindowActivity extends Activity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent ev) {
         if (id < 0) return super.dispatchKeyEvent(ev);   /* awaiting */
+        /* VR controllers: while an XR session runs, gamepad/joystick keys go to
+         * the session (they become OpenVR input) instead of xkb to the client.
+         * Keyboard (non-gamepad source) keeps flowing to the wayland app. */
+        if (xr != null && xr.onKeyEvent(ev)) return true;
         int kc = ev.getKeyCode();
         if (kc == KeyEvent.KEYCODE_VOLUME_UP || kc == KeyEvent.KEYCODE_VOLUME_DOWN
                 || kc == KeyEvent.KEYCODE_VOLUME_MUTE)
@@ -1744,6 +1768,52 @@ public class AwlWindowActivity extends Activity {
         return super.dispatchKeyEvent(ev);
     }
 
+    /** VR controller analog state (stick/trigger/hat) — consumed while an XR
+     *  session runs, otherwise the client gets it as a normal gamepad. */
+    @Override
+    public boolean dispatchGenericMotionEvent(android.view.MotionEvent ev) {
+        if (xr != null && xr.onMotionEvent(ev)) return true;
+        return super.dispatchGenericMotionEvent(ev);
+    }
+
+    /* ---- XR (C_XR) ------------------------------------------------------------
+     * The daemon marks this window XR when its title matches xr_match (the
+     * SteamVR compositor window) and pushes C_XR with the geometry it will
+     * composite at. We then run the IMU session and stream head pose +
+     * controller state back over binder (ONEWAY); the daemon forwards the pose
+     * to the guest's OpenVR driver and reprojects frames with it.
+     * mode=0 (or an untitled window) stops the session — no sensors while the
+     * user is not in VR. */
+
+    private void applyXrState(int mode, int refresh, int eyeW, int eyeH,
+                             int fovMilliDeg, int ipdTenthMm) {
+        xrWanted = mode != 0 && id >= 0;
+        Log.i(TAG, "win " + id + ": C_XR mode=" + mode + " " + eyeW + "x" + eyeH
+                + " per eye @" + refresh + " Hz fov=" + (fovMilliDeg / 1000.0f)
+                + "deg ipd=" + (ipdTenthMm / 10.0f) + "mm"
+                + (xrWanted ? "" : " (tracking off)"));
+        if (xrWanted) startXr();
+        else stopXr();
+    }
+
+    private void startXr() {
+        if (id < 0 || !xrWanted) return;
+        if (xr == null) xr = new AwlXrSession(this, id);
+        xr.start();   /* idempotent; onResume also calls it after a pause */
+    }
+
+    private void stopXr() {
+        if (xr != null) xr.stop();   /* sensors off; the daemon's last pose goes stale */
+    }
+
+    private void releaseXr() {
+        if (xr != null) {
+            xr.shutdown();
+            xr = null;
+        }
+        xrWanted = false;
+    }
+
     /** IME-synthesized key (scanCode=0) → evdev code (matches the embedded keymap) */
     private static int fallbackSc(int keyCode) {
         switch (keyCode) {
@@ -1769,6 +1839,7 @@ public class AwlWindowActivity extends Activity {
     @Override
     protected void onDestroy() {
         fireHost((cbs, win, act) -> cbs.onHostDestroy(win, act));
+        releaseXr();   /* sensors off + a last "no controllers" snapshot */
         if (isFinishing() && id >= 0) Awl.hostGone(id);   /* keep the entry across re-creation */
         LIVE.remove(id);
         if (deathLinked) {

@@ -15,3 +15,6 @@ app/testapp/src/main/jniLibs/
 
 # gradle native build intermediates (libawl cmake)
 .cxx/
+
+# VR: driver + Vulkan layer built by xr/build.sh inside the container
+xr/build/

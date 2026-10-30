@@ -31,6 +31,7 @@
 #include "awl_gl.hpp"
 #include "awl_geom.h"
 #include "awl_bufferqueue.h"
+#include "awl_xr.hpp"
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -338,6 +339,13 @@ static void render_frame(wl_window* w) {
     uint64_t seen[AWL_MAX_LAYERS + 1];
     int nseen = 0;
     bool drew = false;
+    /* XR window (SteamVR compositor, see awl_xr.hpp): replace the plain quad
+     * with the per-eye lens-distortion + reprojection pass. Only the first
+     * content layer is the guest's image; anything stacked above it (a cursor,
+     * an overlay) is dropped in this mode — a distorted cursor would land in
+     * the wrong eye. */
+    const bool xr_on = awl_xr_window_active(w->id);
+    bool xr_drew = false;
     for (int i = 0; i < n; i++) {
         wl_layer& l = w->layers[lay[i].surface_id];
         const struct awl_bq_buffer* b = head[i];
@@ -387,6 +395,16 @@ static void render_frame(wl_window* w) {
         }
         if (!tex) continue;
         seen[nseen++] = lay[i].surface_id;
+
+        if (xr_on) {
+            if (!xr_drew) {
+                awl_xr_draw(tex, bw, bh, vw, vh, lay[i].u0, lay[i].v0, lay[i].su, lay[i].sv);
+                awl_xr_note_render();   /* the pose this frame was composed with */
+                xr_drew = true;
+                drew = true;
+            }
+            continue;   /* no plain quad, no blend bookkeeping */
+        }
 
         /* The stack is kwin order (below children → surface → above children),
          * so the root is not necessarily first: the first layer drawn writes

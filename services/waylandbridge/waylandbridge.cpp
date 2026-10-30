@@ -52,6 +52,7 @@
 #include "awl.h"
 #include "awl_renderer.hpp"
 #include "awl_sc.hpp"
+#include "awl_xr.hpp"
 
 #include <android/binder_ibinder.h>
 #include <android/binder_parcel.h>
@@ -194,6 +195,14 @@ enum {
                             * daemon's death will never EOF yours); (4)
                             * wl_display_connect_to_fd on the kept end. With
                             * config socket_listen=0 this is the only way in. */
+    AWL_T_XR_POSE = 19,   /* (id:i64 qx qy qz qw:f32 px py pz:f32
+                            *  sample_ns:i64 period_ns:i32) — head pose from the
+                            * Activity's IMU session (ONEWAY). Only accepted for a
+                            * window the daemon marked as the XR window; the
+                            * daemon republishes it for the guest OpenVR driver
+                            * and uses it for reprojection (awl_xr.cpp). */
+    AWL_T_XR_INPUT = 20,  /* (id:i64 n:i32 then n*9:i32) — controller snapshot
+                            * (ONEWAY), same layout awl_xr_set_input parses. */
 };
 
 /* ---- window lifecycle events (daemon → subscriber apps, delivered over
@@ -239,6 +248,13 @@ enum {
                                  reset on this window's toplevel → the Activity
                                  re-fetches the pixels (AWL_T_ICON) and re-applies
                                  its task description */
+#define AWL_C_XR 11           /* (mode refresh eye_w eye_h fov_mdeg ipd_mm:i32×6)
+                                 XR session control. The daemon marks a window as
+                                 the XR window by title (xr_match) and pushes the
+                                 geometry it composites with; 0 = this window is
+                                 not XR any more (mode 0) → stop the IMU session.
+                                 The Activity answers with T_XR_POSE/T_XR_INPUT.
+                                 See awl_xr.cpp and docs/vr.md. */
 #define AWL_CTRL_DESC "anland.ICtrl"
 
 /* ---------------- window state table ---------------- */
@@ -276,6 +292,9 @@ struct awl_win_state {
 
 static std::mutex g_state_lock;
 static std::map<uint64_t, awl_win_state> g_wins;
+
+/* XR control push (defined after ctrl_of, which it needs) */
+static void xr_ctrl_send(uint64_t id);
 
 /* death token → associated windows (APP process → multiple windows) */
 struct death_link {
@@ -874,6 +893,7 @@ static void cb_window_destroyed(void* user, uint64_t id) {
 
 static void cb_window_title(void* user, uint64_t id, const char* title) {
     AIBinder* ctrl = nullptr;
+    bool xr_changed = false;
     {
         std::lock_guard<std::mutex> lk(g_state_lock);
         auto it = g_wins.find(id);
@@ -885,9 +905,19 @@ static void cb_window_title(void* user, uint64_t id, const char* title) {
             AIBinder_incStrong(ctrl);   /* keep alive for the out-of-lock transact */
         }
     }
+    /* XR marking rides on the title: the guest's compositor window is the one
+     * whose title matches xr_match (default: SteamVR/vrcompositor). A retitle
+     * that turns the match on or off restarts/stops the Activity's IMU
+     * session (C_XR). */
+    {
+        const bool was = awl_xr_window_active(id);
+        awl_xr_mark_window(id, awl_xr_title_matches(title));
+        xr_changed = awl_xr_window_active(id) != was;
+    }
     /* clients that retitle dynamically (terminals/browsers) → Recents label follows */
     if (ctrl) {
         ctrl_send(ctrl, AWL_C_TITLE, title);
+        if (xr_changed) xr_ctrl_send(id);
         AIBinder_decStrong(ctrl);
     }
 }
@@ -915,6 +945,49 @@ static AIBinder* ctrl_of(uint64_t id) {
     if (it == g_wins.end() || !it->second.ctrl) return nullptr;
     AIBinder_incStrong(it->second.ctrl);
     return it->second.ctrl;
+}
+
+/* One C_XR message carries everything the hosting Activity needs to run (or
+ * stop) the head-tracking session for this window: geometry mode, sample rate,
+ * the eye target the daemon composites at, FOV and IPD. mode=0 = stop.
+ * Sent on attach, on a title that flips the XR match, and on every xr_*
+ * config change that touches the geometry. */
+static void xr_ctrl_send(uint64_t id) {
+    AIBinder* ctrl = ctrl_of(id);
+    if (!ctrl) return;
+    int32_t args[6] = {0, 0, 0, 0, 0, 0};
+    if (awl_xr_window_active(id)) {
+        uint32_t ew = 0, eh = 0, mode = 0;
+        double hz = 0.0;
+        awl_xr_geometry(&ew, &eh, &mode, &hz);
+        const awl_xr_config& c = awl_xr_get();
+        args[0] = (int32_t)mode;
+        args[1] = (int32_t)(hz + 0.5);
+        args[2] = (int32_t)ew;
+        args[3] = (int32_t)eh;
+        args[4] = (int32_t)(c.fov_deg * 1000.0f);   /* milli-degrees */
+        args[5] = (int32_t)(c.ipd_mm * 10.0f);      /* 0.1 mm */
+    }
+    ctrl_send_ints(ctrl, AWL_C_XR, args, 6);
+    AIBinder_decStrong(ctrl);
+    LOGI("window %llu: C_XR mode=%d %dx%d/eye @%d Hz", (unsigned long long)id,
+         args[0], args[2], args[3], args[1]);
+}
+
+/* Re-push C_XR to every XR-marked window (config change). Must not run under
+ * g_cfg_lock: ctrl_send_ints transacts. */
+static void xr_notify_windows(void) {
+    std::vector<uint64_t> ids;
+    {
+        std::lock_guard<std::mutex> lk(g_state_lock);
+        for (auto& [id, ws] : g_wins)
+            if (ws.attached) ids.push_back(id);
+    }
+    for (uint64_t id : ids) {
+        xr_ctrl_send(id);
+        if (awl_xr_window_active(id))
+            backend_request_render(id);   /* redraw under the new distortion */
+    }
 }
 
 static void cb_ime_show(void* user, uint64_t id, uint32_t hint, uint32_t purpose) {
@@ -1200,6 +1273,30 @@ static bool g_sock_listen = true;                      /* socket_listen (same) *
  * cfg_load_sock_cfg before any binder/event thread exists, read-only after */
 static const char* cfg_runtime_dir(void) { return g_sock_dir; }
 
+/* ---------------- XR (VR headset) config ----------------
+ * The XR window (the guest's SteamVR compositor, matched by title) is
+ * composited through a per-eye distortion pass instead of the plain quad —
+ * see awl_xr.cpp. Every value here is an int32 so it travels over
+ * CFG_GET/SET unchanged; the fractional ones are per-mille:
+ *   xr_scale / xr_k1 / xr_k2 / xr_ca  →  value / 1000
+ * Natural units for the rest (Hz, px, degrees, mm). docs/vr.md has the table. */
+static int g_xr_enabled = 0;      /* xr_enabled: 0 off, 1 composite XR windows */
+static int g_xr_mode = 2;         /* xr_mode: 1 mono, 2 sbs-h, 3 sbs-v */
+static int g_xr_refresh = 0;      /* xr_refresh: Hz, 0 = panel refresh */
+static int g_xr_eye_w = 0;        /* xr_eye_w/xr_eye_h: 0 = derive from the panel */
+static int g_xr_eye_h = 0;
+static int g_xr_fov = 90;         /* xr_fov: horizontal FOV per eye, degrees */
+static int g_xr_ipd = 63;         /* xr_ipd: mm */
+static int g_xr_scale = 1000;     /* xr_scale: eye target scale, per-mille */
+static int g_xr_k1 = 0;           /* xr_k1/xr_k2: lens pre-distortion, per-mille */
+static int g_xr_k2 = 0;
+static int g_xr_ca = 0;           /* xr_ca: chromatic aberration, per-mille */
+static char g_xr_match[256] = "vrcompositor,steamvr";
+static bool g_xr_started = false;
+/* Android panel the XR compositor targets (from query_display) */
+static uint32_t g_panel_w = 0, g_panel_h = 0;
+static double g_panel_hz = 72.0;
+
 /* known config keys → valid domain (under g_cfg_lock); unknown keys rejected */
 static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "zoom") { *lo = 50; *hi = 300; return true; }
@@ -1209,6 +1306,16 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "xwayland_scale") { *lo = 0; *hi = 1; return true; }
     if (key == "auto_attach") { *lo = 0; *hi = 1; return true; }
     if (key == "sc_enabled") { *lo = 0; *hi = 1; return true; }
+    /* XR block (docs/vr.md) */
+    if (key == "xr_enabled") { *lo = 0; *hi = 1; return true; }
+    if (key == "xr_mode") { *lo = 0; *hi = 3; return true; }
+    if (key == "xr_refresh") { *lo = 0; *hi = 240; return true; }
+    if (key == "xr_eye_w" || key == "xr_eye_h") { *lo = 0; *hi = 4096; return true; }
+    if (key == "xr_fov") { *lo = 30; *hi = 170; return true; }
+    if (key == "xr_ipd") { *lo = 20; *hi = 90; return true; }
+    if (key == "xr_scale") { *lo = 200; *hi = 2000; return true; }
+    if (key == "xr_k1" || key == "xr_k2") { *lo = -1000; *hi = 2000; return true; }
+    if (key == "xr_ca") { *lo = 0; *hi = 100; return true; }
     return false;
 }
 
@@ -1250,17 +1357,24 @@ static void cfg_save_locked(void) {
     char rt[256];
     memcpy(rt, g_sock_dir, sizeof(rt));
     int sl = g_sock_listen ? 1 : 0;
+    char match[256];
+    memcpy(match, g_xr_match, sizeof(match));
     {
         FILE* f = fopen(AWL_CFG_PATH, "r");
         if (f) {
-            char buf[512] = "";
-            fread(buf, 1, sizeof(buf) - 1, f);
+            /* 4K: the file now carries the XR block too, and a truncated read
+             * would silently reset the preserved keys below */
+            static char buf[4096];
+            size_t got_n = fread(buf, 1, sizeof(buf) - 1, f);
+            buf[got_n] = 0;
             fclose(f);
             char got[256];
             if (cfg_parse_str(buf, "runtime_dir", got, sizeof(got)) == 0 && got[0] == '/')
                 memcpy(rt, got, sizeof(rt));
             int v = cfg_parse_int(buf, "socket_listen");
             if (v == 0 || v == 1) sl = v;
+            if (cfg_parse_str(buf, "xr_match", got, sizeof(got)) == 0)
+                memcpy(match, got, sizeof(match));
         }
     }
     char tmp[128];
@@ -1270,10 +1384,17 @@ static void cfg_save_locked(void) {
     fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n"
                "  \"scale_mode\": %d,\n  \"xwayland_scale\": %d,\n"
                "  \"auto_attach\": %d,\n  \"sc_enabled\": %d,\n"
+               "  \"xr_enabled\": %d,\n  \"xr_mode\": %d,\n"
+               "  \"xr_refresh\": %d,\n  \"xr_eye_w\": %d,\n  \"xr_eye_h\": %d,\n"
+               "  \"xr_fov\": %d,\n  \"xr_ipd\": %d,\n  \"xr_scale\": %d,\n"
+               "  \"xr_k1\": %d,\n  \"xr_k2\": %d,\n  \"xr_ca\": %d,\n"
+               "  \"xr_match\": \"%s\",\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
             g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode,
             g_cfg_xwayland_scale.load(std::memory_order_relaxed) ? 1 : 0,
             g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
+            g_xr_enabled, g_xr_mode, g_xr_refresh, g_xr_eye_w, g_xr_eye_h,
+            g_xr_fov, g_xr_ipd, g_xr_scale, g_xr_k1, g_xr_k2, g_xr_ca, match,
             rt, sl);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
@@ -1288,7 +1409,7 @@ static void cfg_save_locked(void) {
 static void cfg_load_sock_cfg(void) {
     FILE* f = fopen(AWL_CFG_PATH, "r");
     if (!f) return;
-    char buf[512] = "";
+    char buf[4096] = "";
     fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     char dir[256];
@@ -1310,12 +1431,40 @@ static void cfg_load_sock_cfg(void) {
     }
 }
 
+/* Push the XR mirrors into the XR module (first call starts it: mmaps the pose
+ * files and writes anland-xr-display). Caller holds g_cfg_lock — awl_xr_* takes
+ * its own lock and never re-enters daemon config. */
+static void xr_configure_locked(void) {
+    awl_xr_config c;
+    c.enabled = g_xr_enabled != 0;
+    c.mode = g_xr_mode;
+    c.refresh = g_xr_refresh;
+    c.eye_w = g_xr_eye_w;
+    c.eye_h = g_xr_eye_h;
+    c.fov_deg = (float)g_xr_fov;
+    c.ipd_mm = (float)g_xr_ipd;
+    c.render_scale = (float)g_xr_scale / 1000.0f;
+    c.k1 = (float)g_xr_k1 / 1000.0f;
+    c.k2 = (float)g_xr_k2 / 1000.0f;
+    c.ca = (float)g_xr_ca / 1000.0f;
+    snprintf(c.match, sizeof(c.match), "%s", g_xr_match);
+    if (!g_xr_started) {
+        awl_xr_start(c, g_panel_w, g_panel_h, g_panel_hz);
+        g_xr_started = true;
+    } else {
+        awl_xr_apply(c);
+    }
+    if (c.enabled && g_cfg_sc.load(std::memory_order_relaxed))
+        LOGE("xr: xr_enabled=1 but sc_enabled=1 — SurfaceControl layers go straight "
+             "to SurfaceFlinger and cannot be distorted; set sc_enabled=0");
+}
+
 /* startup load + apply (after awl_server_start; no windows at startup →
  * just set the values; each new window's first configure already uses them) */
 static void cfg_load_and_apply(void) {
     FILE* f = fopen(AWL_CFG_PATH, "r");
     if (!f) return;   /* no config file → defaults (zoom 100%, 800x600) */
-    char buf[512] = "";
+    char buf[4096] = "";
     fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     int z = cfg_parse_int(buf, "zoom");
@@ -1378,6 +1527,40 @@ static void cfg_load_and_apply(void) {
     } else if (sc != -1) {
         LOGE("config: sc_enabled=%d out of range (0..1), ignored", sc);
     }
+    /* XR block (docs/vr.md): one validated int per key; the fractional ones
+     * are per-mille (see the mirrors at the top of this block). */
+    {
+        struct key_dom { const char* key; int lo, hi; int* dst; };
+        static const key_dom xri[] = {
+            {"xr_enabled", 0, 1, &g_xr_enabled},
+            {"xr_mode", 0, 3, &g_xr_mode},
+            {"xr_refresh", 0, 240, &g_xr_refresh},
+            {"xr_eye_w", 0, 4096, &g_xr_eye_w},
+            {"xr_eye_h", 0, 4096, &g_xr_eye_h},
+            {"xr_fov", 30, 170, &g_xr_fov},
+            {"xr_ipd", 20, 90, &g_xr_ipd},
+            {"xr_scale", 200, 2000, &g_xr_scale},
+            {"xr_k1", -1000, 2000, &g_xr_k1},
+            {"xr_k2", -1000, 2000, &g_xr_k2},
+            {"xr_ca", 0, 100, &g_xr_ca},
+        };
+        for (const key_dom& k : xri) {
+            int v = cfg_parse_int(buf, k.key);
+            if (v == -1) continue;
+            if (v < k.lo || v > k.hi) {
+                LOGE("config: %s=%d out of range (%d..%d), ignored", k.key, v, k.lo, k.hi);
+                continue;
+            }
+            *k.dst = v;
+        }
+        if (cfg_parse_str(buf, "xr_match", g_xr_match, sizeof(g_xr_match)) == 0)
+            LOGI("config: xr_match=\"%s\"", g_xr_match);
+        std::lock_guard<std::mutex> lk(g_cfg_lock);
+        xr_configure_locked();
+    }
+    if (g_xr_enabled)
+        LOGI("config: XR on (mode=%d fov=%ddeg ipd=%dmm scale=%d/1000 k1=%d/1000 k2=%d/1000)",
+             g_xr_mode, g_xr_fov, g_xr_ipd, g_xr_scale, g_xr_k1, g_xr_k2);
 }
 
 /* set: apply → persist (apply first, write second; a write failure only warns — the live value stays in effect) */
@@ -1445,6 +1628,28 @@ static int cfg_set(const std::string& key, int32_t val) {
             cfg_save_locked();
         }
         LOGI("config set sc_enabled=%d (new attaches + persisted)", val);
+    } else if (key.rfind("xr_", 0) == 0) {
+        /* XR geometry/config: mirrors → module (republishes anland-xr-display)
+         * → persist, then re-push C_XR to the live XR windows. The ctrl
+         * transacts must not run under g_cfg_lock. */
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            if (key == "xr_enabled") g_xr_enabled = val;
+            else if (key == "xr_mode") g_xr_mode = val;
+            else if (key == "xr_refresh") g_xr_refresh = val;
+            else if (key == "xr_eye_w") g_xr_eye_w = val;
+            else if (key == "xr_eye_h") g_xr_eye_h = val;
+            else if (key == "xr_fov") g_xr_fov = val;
+            else if (key == "xr_ipd") g_xr_ipd = val;
+            else if (key == "xr_scale") g_xr_scale = val;
+            else if (key == "xr_k1") g_xr_k1 = val;
+            else if (key == "xr_k2") g_xr_k2 = val;
+            else g_xr_ca = val;
+            xr_configure_locked();
+            cfg_save_locked();
+            LOGI("config set %s=%d (applied + persisted)", key.c_str(), val);
+        }
+        xr_notify_windows();
     }
     return 0;
 }
@@ -1563,7 +1768,10 @@ static bool caller_ok(transaction_code_t code) {
         code == AWL_T_CONNECT ||
         code == AWL_T_PAUSE || code == AWL_T_RESIZE || code == AWL_T_FOCUS ||
         code == AWL_T_INPUT || code == AWL_T_IME || code == AWL_T_CLIPBOARD ||
-        code == AWL_T_ICON || code == AWL_T_CLOSE)
+        code == AWL_T_ICON || code == AWL_T_CLOSE ||
+        /* XR telemetry: same shape as A:INPUT (carries a window id, only
+         * honoured for windows this daemon marked XR — see the handlers) */
+        code == AWL_T_XR_POSE || code == AWL_T_XR_INPUT)
         return true;
 
     uid_t u = AIBinder_getCallingUid();
@@ -1737,6 +1945,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         awl_window_resize(id, w, h);         /* Android fully owns sizing (initial + subsequent) */
         xwm_resize_window(id, w, h);         /* Xwayland window: sync initial size to the X side */
         backend_request_render(id);          /* render a first frame */
+        xr_ctrl_send(id);                    /* XR windows: start the IMU session (mode=0 otherwise) */
         evt_dispatch(awl_window_client_uid(id), id, AWL_E_ATTACHED, nullptr);
         LOGI("SURFACE %llu %dx%d → attached (host=%lld)",
              (unsigned long long)id, w, h, (long long)host);
@@ -2037,6 +2246,17 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             v = g_cfg_auto_attach ? 1 : 0;
         }
         else if (key == "sc_enabled") v = g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0;
+        else if (key == "xr_enabled") v = g_xr_enabled;
+        else if (key == "xr_mode") v = g_xr_mode;
+        else if (key == "xr_refresh") v = g_xr_refresh;
+        else if (key == "xr_eye_w") v = g_xr_eye_w;
+        else if (key == "xr_eye_h") v = g_xr_eye_h;
+        else if (key == "xr_fov") v = g_xr_fov;
+        else if (key == "xr_ipd") v = g_xr_ipd;
+        else if (key == "xr_scale") v = g_xr_scale;
+        else if (key == "xr_k1") v = g_xr_k1;
+        else if (key == "xr_k2") v = g_xr_k2;
+        else if (key == "xr_ca") v = g_xr_ca;
         else LOGE("config get: unknown key '%s'", key.c_str());
         AParcel_writeInt32(out, v);
         return STATUS_OK;
@@ -2048,6 +2268,39 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             AParcel_readInt32(in, &val) != STATUS_OK)
             return STATUS_BAD_VALUE;
         AParcel_writeInt32(out, cfg_set(key, val));
+        return STATUS_OK;
+    }
+    case AWL_T_XR_POSE: {   /* head pose from the hosting Activity's IMU (ONEWAY) */
+        int64_t id64 = 0, sample_ns = 0;
+        int32_t period = 0;
+        float q[4] = {0.0f, 0.0f, 0.0f, 1.0f}, p[3] = {0.0f, 0.0f, 0.0f};
+        if (AParcel_readInt64(in, &id64) != STATUS_OK) return STATUS_BAD_VALUE;
+        for (int i = 0; i < 4; i++)
+            if (AParcel_readFloat(in, &q[i]) != STATUS_OK) return STATUS_BAD_VALUE;
+        for (int i = 0; i < 3; i++)
+            if (AParcel_readFloat(in, &p[i]) != STATUS_OK) return STATUS_BAD_VALUE;
+        if (AParcel_readInt64(in, &sample_ns) != STATUS_OK ||
+            AParcel_readInt32(in, &period) != STATUS_OK)
+            return STATUS_BAD_VALUE;
+        const uint64_t id = (uint64_t)id64;
+        if (!window_ok(id) || !awl_xr_window_active(id)) return STATUS_PERMISSION_DENIED;
+        awl_xr_set_pose(q, p, (uint64_t)sample_ns, (uint32_t)(period > 0 ? period : 0));
+        return STATUS_OK;
+    }
+    case AWL_T_XR_INPUT: {   /* controller state, same packing as awl_xr_set_input (ONEWAY) */
+        int64_t id64 = 0;
+        int32_t n = 0;
+        if (AParcel_readInt64(in, &id64) != STATUS_OK ||
+            AParcel_readInt32(in, &n) != STATUS_OK)
+            return STATUS_BAD_VALUE;
+        if (n < 0 || n > 63) return STATUS_BAD_VALUE;
+        int32_t ints[64];
+        ints[0] = n;
+        for (int32_t i = 0; i < n; i++)
+            if (AParcel_readInt32(in, &ints[i + 1]) != STATUS_OK) return STATUS_BAD_VALUE;
+        const uint64_t id = (uint64_t)id64;
+        if (!window_ok(id) || !awl_xr_window_active(id)) return STATUS_PERMISSION_DENIED;
+        awl_xr_set_input(ints, (size_t)n + 1);
         return STATUS_OK;
     }
     default:
@@ -2129,6 +2382,14 @@ int main(int argc, char** argv) {
 
     awl_display_info_t info;
     query_display(&info);
+
+    /* XR: the module addresses the pose/input seqlock files (and the guest's
+     * driver, which reads the same env through anlandx) relative to the
+     * runtime dir, and derives the per-eye target from the panel. */
+    setenv("ANLAND_RUNTIME_DIR", g_sock_dir, 1);
+    g_panel_w = info.width;
+    g_panel_h = info.height;
+    g_panel_hz = info.refresh_hz > 0 ? info.refresh_hz : 72.0;
 
     /* socket_listen=0 (#36): no unix socket at all — clients connect only by
      * sending their own socketpair end over binder T_CONNECT */

@@ -17,6 +17,7 @@
 #   make pulse-deps # its static deps: libsndfile / libsoxr / libltdl (tarballs, sha256-pinned)
 #   make anlandx    # in-container anland session (D-Bus + Xwayland + mini-wm), SOURCE tarball (build/anlandx.tar.gz)
 #   make libffi     # one-time bootstrap: cross-compile libffi (skipped if present)
+#   make vr         # SteamVR driver + Vulkan layer (xr/); build this INSIDE the container
 #   make clean
 SHELL := /bin/bash
 .ONESHELL:
@@ -53,7 +54,7 @@ PA_DEPS   := $(OUT)/pulse-deps
 PA_STAGE  := $(OUT)/pulse-stage
 PA_ROOT   := $(PA_STAGE)$(PA_PREFIX)
 
-.PHONY: all check-tools native native-debug apk module pulse pulse-deps anlandx libffi clean
+.PHONY: all check-tools native native-debug apk module pulse pulse-deps anlandx libffi vr clean
 
 all: native apk module anlandx
 	md5sum "$(OUT)/waylandbridge" "$(OUT)/anland-wayland.apk" \
@@ -275,6 +276,11 @@ anlandx:
 	   LICENSE "$(OUT)/anlandx/"
 	cp anland-session/setup.sh "$(OUT)/anlandx/setupanlandx.sh"
 	cp -r patches "$(OUT)/anlandx/patches"
+	# VR: the SteamVR driver, the Vulkan layer and the helper script are built
+	# *inside* the container (xr/build.sh) — the container's glibc is not what
+	# the NDK targets, so this ships sources plus the script, not binaries.
+	cp -r xr "$(OUT)/anlandx/xr"
+	chmod +x "$(OUT)/anlandx/xr/build.sh" "$(OUT)/anlandx/xr/anland-steamvr"
 	# bubblewrap: pristine v0.11.1 sources + anland config.h, patch applied below
 	cp third_party/bubblewrap/*.c third_party/bubblewrap/*.h \
 	   third_party/bubblewrap/COPYING "$(OUT)/anlandx/bubblewrap/"
@@ -339,4 +345,11 @@ libffi: check-tools
 	echo "libffi installed to build/libffi-android-out"
 
 clean:
-	rm -rf "$(BUILD)" "$(BUILD_DBG)" app/build "$(OUT)/module"
+	rm -rf "$(BUILD)" "$(BUILD_DBG)" app/build "$(OUT)/module" "$(OUT)/vr"
+
+# ---------------- VR (SteamVR driver + Vulkan layer) ----------------
+# These run inside the container, next to SteamVR, with the container's own
+# compiler: the Android NDK targets bionic and SteamVR is glibc, so they cannot
+# be cross-built here. `make anlandx` ships xr/ in build/anlandx.tar.gz.
+vr:
+	xr/build.sh

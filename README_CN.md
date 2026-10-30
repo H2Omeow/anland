@@ -114,6 +114,15 @@ make        # waylandbridge + 宿主 APK + 模块 zip + anlandx 压缩包
 
 CI 会在每次 push/PR 时构建并上传产物。
 
+## VR：在 XR 窗口里跑 SteamVR
+
+VR 支持不把显示交给容器。`vrcompositor` 依然画进一个普通窗口；守护进程认出这个窗口，在把窗口画面贴出去的同时把图像弯成左右眼（每眼预畸变 + 用手机 IMU 做时域重投影），并把头部位姿和手柄状态写成小段 seqlock 文件给容器。容器里由 OpenVR 驱动（`xr/driver`）和 Vulkan 隐式层（`xr/layer`）让 SteamVR 相信它拥有一台窗口化的头显：
+
+- 守护进程配置里 `sc_enabled = 0`、`xr_enabled = 1`；
+- 容器里跑 `xr/build.sh`，再 `xr/anland-steamvr install`、`xr/anland-steamvr start`。
+
+头部追踪是 3DoF（只有朝向），两个手柄其实是一个手柄映射到标准 OpenVR 配置，畸变在宿主侧做——几何、配置项与限制见 [docs/vr.md](docs/vr.md)。
+
 ## 相关项目
 
 - [anland-shell](https://github.com/SuperTurtleDev/anland-shell)——启动器：容器管理与启动这一切的应用格子。

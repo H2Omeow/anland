@@ -352,6 +352,7 @@ add_executable(waylandbridge
   awl_gl.cpp
   awl_sc.cpp
   awl_renderer.cpp
+  awl_xr.cpp
   waylandbridge.cpp
 )
 target_include_directories(waylandbridge PRIVATE
@@ -360,6 +361,7 @@ target_include_directories(waylandbridge PRIVATE
   ${AWL_GENERATED}/config
   ${AWL}/third_party          # keymap_evdev.h (embedded xkb keymap)
   ${AWL}/third_party/include  # sys/ucred.h shim
+  ${AWL}/xr/include           # anland_xr_wire.h (shared with xr/driver)
   ${LIBFFI_DIR}/include)
 target_link_libraries(waylandbridge
   PRIVATE wayland-server-static binder_ndk android log EGL GLESv3 nativewindow)

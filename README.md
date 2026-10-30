@@ -124,6 +124,24 @@ make        # waylandbridge + host APK + module zip + anlandx tarball
 
 CI builds every push/PR and uploads the artifacts.
 
+## VR: SteamVR in an XR window
+
+The VR support does not hand the display over to the container. `vrcompositor`
+keeps drawing into an ordinary window; the daemon recognises it, bends the image
+into the two eyes (per-eye pre-distortion plus timewarp against the phone's IMU)
+while it blits that window out, and publishes head pose and gamepad state as
+small seqlock files. Inside the container an OpenVR server driver
+(`xr/driver`) and a Vulkan implicit layer (`xr/layer`) make SteamVR believe it
+owns a windowed HMD:
+
+- `sc_enabled = 0` and `xr_enabled = 1` in the daemon config,
+- `xr/build.sh` inside the container, then `xr/anland-steamvr install` and
+  `xr/anland-steamvr start`.
+
+Head tracking is 3DoF (orientation only), the two controllers are a gamepad
+mapped onto the standard OpenVR profile, and the distortion happens on the host —
+see [docs/vr.md](docs/vr.md) for the geometry, the config keys and the limits.
+
 ## Related projects
 
 - [anland-shell](https://github.com/SuperTurtleDev/anland-shell) — the launcher: container management and the app grid that drives all of this.
