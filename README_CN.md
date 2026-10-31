@@ -115,7 +115,7 @@ make        # waylandbridge + 宿主 APK + 模块 zip + anlandx 压缩包
 有两样东西不在仓库里、也不会自动安装：一是用仓库锁定的 wayland fork 自己构建的
 `wayland-scanner`，二是覆盖到 submodule 上的 libffi release tarball（git checkout
 里没有生成的 `configure`）。完整步骤、代理设置和常见错误见
-[docs/build.md](docs/build.md)。
+[docs/build.md](docs/build.md)（中文版 [docs/build.zh.md](docs/build.zh.md)）。
 
 CI 会在每次 push/PR 时构建并上传产物；打 `v*` 标签则会发布 Release，附带 APK、
 AAR、模块 zip 和会话压缩包。
@@ -144,7 +144,9 @@ bash anlandx/anland-session.sh &
 bash anlandx/anland-desktop         # 自动挑 kwin_wayland > weston > sway > mutter
 ```
 
-广告了哪些协议、启动器怎么用、怎么验证（`wayland-info`、`logcat -s waylandbridge`）以及限制（没有 DRM/KMS、同时只有一个桌面、完整 Plasma 会话尚未在真机上验证）见 [docs/desktop.md](docs/desktop.md)。这两个开关也在 **窗口设置 → 桌面** 里。
+广告了哪些协议、启动器怎么用、怎么验证（`wayland-info`、`logcat -s waylandbridge`）以及限制（没有 DRM/KMS、同时只有一个桌面、完整 Plasma 会话尚未在真机上验证）见 [docs/desktop.md](docs/desktop.md)（中文版 [docs/desktop.zh.md](docs/desktop.zh.md)）。这两个开关也在 **窗口设置 → 桌面** 里。
+
+`docs/` 下的每一份文档都在旁边有一份中文版（`*.zh.md`）；改一份就要改两份。
 
 ## 相关项目
 

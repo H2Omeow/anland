@@ -1,5 +1,7 @@
 # Desktop: a nested compositor in an anland window
 
+> 中文版：[desktop.zh.md](desktop.zh.md) · English (this file)
+
 anland 6 gives every Wayland toplevel its own Android window. That is ideal
 for single-app containers, and it is also exactly what a desktop compositor
 needs to run *nested*: KWin, Weston, Sway or Mutter already know how to be a
@@ -192,8 +194,10 @@ normal.
 * **Frame pacing is host-side.** The host presents when the window's buffer
   arrives and the panel vblanks; a compositor that wants strict pacing should
   honour `wp_presentation` rather than assume a fixed refresh.
-* **3DoF only in VR.** Running a desktop inside a VR session inherits the
-  limits of `docs/vr.md` (orientation-only head tracking, one XR window).
+* **3DoF only in VR, by default.** Running a desktop inside a VR session inherits
+  the limits of `docs/vr.md`: orientation-only head tracking unless a 6DoF
+  provider publishes `anland-xr-pose-ext`, and only one XR window can be the
+  headset view.
 * **Not device-tested yet.** The host protocols, the session mode and the
   launcher compile and are self-consistent; a nested KWin/Plasma session has
   not been run on the author's hardware. The verification steps above are the

@@ -125,7 +125,8 @@ make        # waylandbridge + host APK + module zip + anlandx tarball
 Two things live outside the repo and are not auto-installed — a
 `wayland-scanner` built from the pinned fork, and a libffi release tarball
 overlaid on the submodule (the checkout ships no generated `configure`). Steps,
-proxies and troubleshooting are in [docs/build.md](docs/build.md).
+proxies and troubleshooting are in [docs/build.md](docs/build.md)
+(中文: [docs/build.zh.md](docs/build.zh.md)).
 
 CI builds every push/PR and uploads the artifacts; a `v*` tag publishes a
 release with the APK, the AAR, the module zip and the session tarball.
@@ -186,7 +187,10 @@ bash anlandx/anland-desktop         # auto-detects kwin_wayland > weston > sway 
 launcher, verification (`wayland-info`, `logcat -s waylandbridge`) and the
 limits — no DRM/KMS, one desktop at a time, and a note that a full Plasma
 session has not been device-tested yet. Both keys are in
-**Window Settings → Desktop** as well.
+**Window Settings → Desktop** as well. 中文: [docs/desktop.zh.md](docs/desktop.zh.md).
+
+Every document under `docs/` has a Chinese twin next to it (`*.zh.md`); if you
+change one, change both.
 
 ## Related projects
 

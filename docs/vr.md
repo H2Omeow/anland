@@ -1,5 +1,7 @@
 # VR: running SteamVR in an anland window
 
+> 中文版：[vr.zh.md](vr.zh.md) · English (this file)
+
 anland turns every Wayland toplevel into an Android window. SteamVR's
 `vrcompositor` is, to the container, just another client with a window — so the
 VR path here is not a display hand-over: the compositor keeps drawing into its

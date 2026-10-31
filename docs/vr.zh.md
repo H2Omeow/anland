@@ -1,5 +1,7 @@
 # VR：在一个 anland 窗口里跑 SteamVR
 
+> 中文版（本文件）· English: [vr.md](vr.md)
+
 anland 把每个 Wayland toplevel 变成一个 Android 窗口。在容器看来，SteamVR 的
 `vrcompositor` 只是“又一个带窗口的客户端”——所以这里的 VR 路径不是把显示交出去：
 合成器继续往自己的 toplevel 里画，守护进程在把窗口贴到手机或 AR 眼镜上的时候，

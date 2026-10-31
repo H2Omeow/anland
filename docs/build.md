@@ -1,5 +1,7 @@
 # Building anland
 
+> 中文版：[build.zh.md](build.zh.md) · English (this file)
+
 Everything in this file was verified on a Linux host against the commit that
 introduced the VR path (`xr/`), producing all four release artifacts. CI runs
 the same steps (`.github/workflows/build.yml`, `.github/workflows/release.yml`).
