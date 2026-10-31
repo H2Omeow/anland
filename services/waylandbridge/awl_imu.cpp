@@ -310,6 +310,7 @@ void reader_loop(void) {
     src gyro, accel;
     awl_imu_config active;
     bool have_cfg = false;
+    bool need_redetect = false;   /* device disappeared or was never found */
     unsigned applied_gen = 0;
     double q[4] = {0.0, 0.0, 0.0, 1.0};
     double bias[3] = {0.0, 0.0, 0.0};
@@ -321,12 +322,13 @@ void reader_loop(void) {
             if (rt.stop) break;
             /* Only a generation bump means the configuration changed; the loop
              * otherwise keeps its open channel fds across ticks. */
-            if (have_cfg && rt.want_gen == applied_gen) {
+            if (have_cfg && rt.want_gen == applied_gen && !need_redetect) {
                 lk.unlock();
             } else {
                 active = rt.want;
                 applied_gen = rt.want_gen;
                 have_cfg = true;
+                need_redetect = false;
                 lk.unlock();
                 close_src(gyro);
                 close_src(accel);
@@ -343,11 +345,13 @@ void reader_loop(void) {
                         set_source("no iio device with gyro+accel channels");
                         LOGW("imu: no usable iio device (looked for in_anglvel_*_raw and "
                              "in_accel_*_raw under /sys/bus/iio/devices) - retrying");
+                        need_redetect = true;
                     } else if (!open_src(gd, "anglvel", 0.001, gyro) ||
                                !open_src(ad, "accel", 0.0005987548828125, accel)) {
                         close_src(gyro);
                         close_src(accel);
                         set_source("iio channels vanished");
+                        need_redetect = true;
                     } else {
                         try_set_rate(gd, active.rate_hz);
                         try_set_rate(ad, active.rate_hz);
@@ -383,6 +387,7 @@ void reader_loop(void) {
             close_src(accel);
             rt.live.store(false, std::memory_order_relaxed);
             set_source("sensor read failed");
+            need_redetect = true;
             std::unique_lock<std::mutex> lk(rt.m);
             rt.cv.wait_for(lk, std::chrono::milliseconds(500));
             continue;
