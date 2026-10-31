@@ -127,7 +127,7 @@ VR 支持不把显示交给容器。`vrcompositor` 依然画进一个普通窗�
 - 守护进程配置里 `sc_enabled = 0`、`xr_enabled = 1`；
 - 容器里跑 `xr/build.sh`，再 `xr/anland-steamvr install`、`xr/anland-steamvr start`。
 
-头部追踪默认是 3DoF（只有朝向）——6DoF 源可以通过 `anland-xr-pose-ext` 文件接管姿态，`xr_predict` 会把最新采样外推来掩盖姿态延迟；两个手柄是映射到标准 OpenVR 配置的手柄（有东西写真实位姿时也会用），畸变在宿主侧做——几何、配置项与现在还剩下的限制见 [docs/vr.md](docs/vr.md)（中文版 [docs/vr.zh.md](docs/vr.zh.md)）。所有可调项（眼睛布局、刷新率、每眼尺寸、视场角、瞳距、渲染比例、畸变、色散、姿态预测、匹配标题）都在 **窗口设置 → VR** 里，还有一个 Quest 3S 预设；改动对正在运行的会话立即生效，不用重启。
+头部追踪是 3DoF（只有朝向），但不走 Android 交给 2D 窗口的那个受限流融合姿态：守护进程本来就是 root，所以它自己读陀螺仪和加速度计（`xr_imu`，最高 1 kHz）。6DoF 源可以通过 `anland-xr-pose-ext` 文件接管姿态，`xr_predict` 会把最新采样外推来掩盖姿态延迟；两个手柄是映射到标准 OpenVR 配置的手柄（有东西写真实位姿时也会用），畸变在宿主侧做——几何、配置项与现在还剩下的限制见 [docs/vr.md](docs/vr.md)（中文版 [docs/vr.zh.md](docs/vr.zh.md)）。所有可调项（眼睛布局、刷新率、每眼尺寸、视场角、瞳距、渲染比例、畸变、色散、姿态预测、传感器来源与采样率、匹配标题）都在 **窗口设置 → VR** 里，还有一个 Quest 3S 预设；改动对正在运行的会话立即生效，不用重启。
 
 ## 桌面：在一个窗口里跑嵌套合成器
 

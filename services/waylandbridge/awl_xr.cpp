@@ -482,6 +482,19 @@ void quat_mul(const double a[4], const double b[4], double out[4]) {
     out[3] = aw * bw - ax * bx - ay * by - az * bz;
 }
 
+/* Android's game-rotation-vector is expressed in the ENU world frame (x east,
+ * y north, z up). SteamVR's standing space is y up, -z forward. Both are
+ * orthonormal frames, so a single fixed rotation takes one to the other:
+ * -90° about x, applied on the left (it is a basis change of the target).
+ * The rotation vector from SensorManager and the root IMU reader (same
+ * convention on purpose) both go through here; an external provider is
+ * documented to already speak the VR frame and is left alone. */
+const double kEnuToVr[4] = {-0.70710678118654752, 0.0, 0.0, 0.70710678118654752};
+
+void quat_enu_to_vr(const double q[4], double out[4]) {
+    quat_mul(kEnuToVr, q, out);
+}
+
 /* Column-major 3x3 for GL from a unit quaternion. */
 void quat_to_mat3(const double q[4], float m[9]) {
     const double x = q[0], y = q[1], z = q[2], w = q[3];
@@ -671,6 +684,12 @@ void set_pose_common(const float quat[4], const float pos[3], const float ang_ve
     double n = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     if (n < 1e-6) { q[0] = q[1] = q[2] = 0.0; q[3] = 1.0; }
     else for (int i = 0; i < 4; i++) q[i] /= n;
+    {
+        /* the Activity sends SensorManager's ENU pose */
+        double vr[4];
+        quat_enu_to_vr(q, vr);
+        for (int i = 0; i < 4; i++) q[i] = vr[i];
+    }
     const uint64_t ns = sample_ns ? sample_ns : now_ns();
     if (ang_vel) {
         for (int i = 0; i < 3; i++) g.ang_vel[i] = ang_vel[i];
@@ -711,6 +730,12 @@ void awl_xr_submit_imu(const float quat[4], const float ang_vel[3], uint64_t sam
     double n = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     if (n < 1e-6) { q[0] = q[1] = q[2] = 0.0; q[3] = 1.0; }
     else for (int i = 0; i < 4; i++) q[i] /= n;
+    {
+        /* awl_imu integrates in the same ENU frame the Activity reports */
+        double vr[4];
+        quat_enu_to_vr(q, vr);
+        for (int i = 0; i < 4; i++) q[i] = vr[i];
+    }
 
     for (int i = 0; i < 4; i++) g.q[i] = q[i];
     if (ang_vel) for (int i = 0; i < 3; i++) g.ang_vel[i] = ang_vel[i];

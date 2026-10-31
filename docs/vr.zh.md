@@ -82,6 +82,11 @@ imu: reading iio:device1 (gyro) and iio:device1 (accel) at 200 Hz
 `ls /sys/bus/iio/devices/*/name` 能看到内核给它们的名字。`xr_imu = 0` 回退到 Activity
 的融合姿态；外部 6DoF 文件存在且新鲜时，优先级高于这两者。
 
+传感器坐标系带来一个副作用：Android 报的是“东/北/上”坐标系，守护进程用一个固定
+旋转把它转进 SteamVR 的“y 朝上、-z 朝前”站立空间。这条链路里没有磁力计，所以“前”
+就是你手机开机时北边所在的方向——进会话后第一件事应该是 SteamVR 的“重置坐姿”
+（或从 dashboard 重新居中）。之后追踪是相对的，会稳定下来。
+
 ## 打开它
 
 这些也都能在手机上改：**窗口设置 → VR**。设置页通过 binder

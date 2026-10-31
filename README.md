@@ -145,17 +145,19 @@ owns a windowed HMD:
 - `xr/build.sh` inside the container, then `xr/anland-steamvr install` and
   `xr/anland-steamvr start`.
 
-Head tracking is 3DoF by default (orientation only) — a 6DoF source can take the
-pose over through the `anland-xr-pose-ext` file, and `xr_predict` extrapolates
-the newest sample to hide pose latency. The two controllers are a gamepad mapped
-onto the standard OpenVR profile (they accept real poses if something writes
-them), and the distortion happens on the host — see
+Head tracking is 3DoF (orientation only) but it does not go through the throttled
+fused pose Android hands a 2D window: the daemon is root anyway, so it reads the
+gyroscope and accelerometer itself (`xr_imu`, up to 1 kHz). A 6DoF source can
+take the pose over through the `anland-xr-pose-ext` file, and `xr_predict`
+extrapolates the newest sample to hide pose latency. The two controllers are a
+gamepad mapped onto the standard OpenVR profile (they accept real poses if
+something writes them), and the distortion happens on the host — see
 [docs/vr.md](docs/vr.md) (中文: [docs/vr.zh.md](docs/vr.zh.md)) for the geometry,
 the config keys and what is left of the limits.
 Every knob (eye layout, refresh, per-eye size, FOV, IPD, render scale,
-distortion, chromatic aberration, pose prediction, the title that selects the
-window) lives in **Window Settings → VR**, with a Quest 3S preset; changes reach
-a running session without restarting anything.
+distortion, chromatic aberration, pose prediction, sensor source and rate, the
+title that selects the window) lives in **Window Settings → VR**, with a Quest 3S
+preset; changes reach a running session without restarting anything.
 
 ## Desktop: a nested compositor in a window
 

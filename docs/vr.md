@@ -92,6 +92,13 @@ a concrete path — `ls /sys/bus/iio/devices/*/name` tells you what the kernel
 calls them. `xr_imu = 0` falls back to the activity's fused pose; the external
 6DoF file, when present and fresh, outranks both.
 
+One consequence of the sensor frame: Android reports orientation in an
+east/north/up frame, and the daemon rotates that into SteamVR's y-up, -z-forward
+standing space with a fixed rotation. There is no magnetometer in the loop, so
+"forward" is wherever the phone's North happened to be when it booted — the
+first thing to do in a session is SteamVR's *Reset Seated Position* (or recentre
+from the dashboard). After that the tracking is relative and stable.
+
 ## Turning it on
 
 Everything here is also on the phone: **Window Settings → VR**. The settings
