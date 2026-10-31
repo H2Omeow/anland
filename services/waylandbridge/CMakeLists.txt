@@ -386,6 +386,7 @@ add_executable(waylandbridge
   awl_sc.cpp
   awl_renderer.cpp
   awl_xr.cpp
+  awl_imu.cpp
   waylandbridge.cpp
 )
 target_include_directories(waylandbridge PRIVATE

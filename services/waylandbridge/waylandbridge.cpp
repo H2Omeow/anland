@@ -53,6 +53,7 @@
 #include "awl_renderer.hpp"
 #include "awl_sc.hpp"
 #include "awl_xr.hpp"
+#include "awl_imu.hpp"
 
 #include <android/binder_ibinder.h>
 #include <android/binder_parcel.h>
@@ -1316,6 +1317,12 @@ static int g_xr_k1 = 0;           /* xr_k1/xr_k2: lens pre-distortion, per-mille
 static int g_xr_k2 = 0;
 static int g_xr_ca = 0;           /* xr_ca: chromatic aberration, per-mille */
 static int g_xr_predict = 0;      /* xr_predict: ms of pose extrapolation, 0 = off */
+/* Root-side IMU reader (awl_imu.cpp): the daemon is root, so it can read the
+ * raw gyro/accel channels instead of waiting for the Activity's fused pose. */
+static int g_xr_imu = 0;          /* xr_imu: 0 off, 1 read the sensors directly */
+static int g_xr_imu_hz = 200;     /* xr_imu_hz: polling rate */
+static char g_xr_imu_gyro[128] = "";  /* xr_imu_gyro/accel: empty = auto-detect */
+static char g_xr_imu_accel[128] = "";
 static char g_xr_match[256] = "vrcompositor,steamvr";
 static bool g_xr_started = false;
 /* Android panel the XR compositor targets (from query_display) */
@@ -1440,6 +1447,8 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "xr_k1" || key == "xr_k2") { *lo = -1000; *hi = 2000; return true; }
     if (key == "xr_ca") { *lo = 0; *hi = 100; return true; }
     if (key == "xr_predict") { *lo = 0; *hi = 120; return true; }
+    if (key == "xr_imu") { *lo = 0; *hi = 1; return true; }
+    if (key == "xr_imu_hz") { *lo = 50; *hi = 1000; return true; }
     /* desktop block (docs/desktop.md) */
     if (key == "desktop_mode") { *lo = 0; *hi = 1; return true; }
     return false;
@@ -1487,6 +1496,10 @@ static void cfg_save_locked(void) {
     memcpy(match, g_xr_match, sizeof(match));
     char dmatch[256];
     memcpy(dmatch, g_desktop_match, sizeof(dmatch));
+    char igyro[128];
+    memcpy(igyro, g_xr_imu_gyro, sizeof(igyro));
+    char iaccel[128];
+    memcpy(iaccel, g_xr_imu_accel, sizeof(iaccel));
     {
         FILE* f = fopen(AWL_CFG_PATH, "r");
         if (f) {
@@ -1505,6 +1518,10 @@ static void cfg_save_locked(void) {
                 memcpy(match, got, sizeof(match));
             if (cfg_parse_str(buf, "desktop_match", got, sizeof(got)) == 0)
                 memcpy(dmatch, got, sizeof(dmatch));
+            if (cfg_parse_str(buf, "xr_imu_gyro", got, sizeof(got)) == 0)
+                snprintf(igyro, sizeof(igyro), "%s", got);
+            if (cfg_parse_str(buf, "xr_imu_accel", got, sizeof(got)) == 0)
+                snprintf(iaccel, sizeof(iaccel), "%s", got);
         }
     }
     char tmp[128];
@@ -1519,6 +1536,8 @@ static void cfg_save_locked(void) {
                "  \"xr_fov\": %d,\n  \"xr_ipd\": %d,\n  \"xr_scale\": %d,\n"
                "  \"xr_k1\": %d,\n  \"xr_k2\": %d,\n  \"xr_ca\": %d,\n"
                "  \"xr_predict\": %d,\n"
+               "  \"xr_imu\": %d,\n  \"xr_imu_hz\": %d,\n"
+               "  \"xr_imu_gyro\": \"%s\",\n  \"xr_imu_accel\": \"%s\",\n"
                "  \"xr_match\": \"%s\",\n"
                "  \"desktop_mode\": %d,\n  \"desktop_match\": \"%s\",\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
@@ -1527,6 +1546,7 @@ static void cfg_save_locked(void) {
             g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
             g_xr_enabled, g_xr_mode, g_xr_refresh, g_xr_eye_w, g_xr_eye_h,
             g_xr_fov, g_xr_ipd, g_xr_scale, g_xr_k1, g_xr_k2, g_xr_ca, g_xr_predict,
+            g_xr_imu, g_xr_imu_hz, igyro, iaccel,
             match,
             g_desktop_mode, dmatch,
             rt, sl);
@@ -1592,6 +1612,17 @@ static void xr_configure_locked(void) {
     if (c.enabled && g_cfg_sc.load(std::memory_order_relaxed))
         LOGE("xr: xr_enabled=1 but sc_enabled=1 — SurfaceControl layers go straight "
              "to SurfaceFlinger and cannot be distorted; set sc_enabled=0");
+
+    /* Root IMU reader. Only feeds the XR pass, so it idles while XR is off.
+     * awl_imu_apply() owns its thread and never takes g_cfg_lock. */
+    awl_imu_config ic;
+    ic.enabled = (g_xr_imu != 0 && c.enabled && c.mode >= 1) ? 1 : 0;
+    ic.rate_hz = g_xr_imu_hz;
+    snprintf(ic.gyro, sizeof(ic.gyro), "%s", g_xr_imu_gyro);
+    snprintf(ic.accel, sizeof(ic.accel), "%s", g_xr_imu_accel);
+    awl_imu_apply(ic);
+    if (ic.enabled)
+        LOGI("xr: root IMU on (%d Hz, %s)", ic.rate_hz, awl_imu_source());
 }
 
 /* startup load + apply (after awl_server_start; no windows at startup →
@@ -1679,6 +1710,8 @@ static void cfg_load_and_apply(void) {
             {"xr_k2", -1000, 2000, &g_xr_k2},
             {"xr_ca", 0, 100, &g_xr_ca},
             {"xr_predict", 0, 120, &g_xr_predict},
+            {"xr_imu", 0, 1, &g_xr_imu},
+            {"xr_imu_hz", 50, 1000, &g_xr_imu_hz},
         };
         for (const key_dom& k : xri) {
             int v = cfg_parse_int(buf, k.key);
@@ -1691,6 +1724,12 @@ static void cfg_load_and_apply(void) {
         }
         if (cfg_parse_str(buf, "xr_match", g_xr_match, sizeof(g_xr_match)) == 0)
             LOGI("config: xr_match=\"%s\"", g_xr_match);
+        if (cfg_parse_str(buf, "xr_imu_gyro", g_xr_imu_gyro, sizeof(g_xr_imu_gyro)) == 0 &&
+            g_xr_imu_gyro[0])
+            LOGI("config: xr_imu_gyro=\"%s\"", g_xr_imu_gyro);
+        if (cfg_parse_str(buf, "xr_imu_accel", g_xr_imu_accel, sizeof(g_xr_imu_accel)) == 0 &&
+            g_xr_imu_accel[0])
+            LOGI("config: xr_imu_accel=\"%s\"", g_xr_imu_accel);
         std::lock_guard<std::mutex> lk(g_cfg_lock);
         xr_configure_locked();
     }
@@ -1806,6 +1845,8 @@ static int cfg_set(const std::string& key, int32_t val) {
             else if (key == "xr_k1") g_xr_k1 = val;
             else if (key == "xr_k2") g_xr_k2 = val;
             else if (key == "xr_predict") g_xr_predict = val;
+            else if (key == "xr_imu") g_xr_imu = val;
+            else if (key == "xr_imu_hz") g_xr_imu_hz = val;
             else if (key == "xr_ca") g_xr_ca = val;
             else {
                 LOGE("config set: unknown xr key '%s'", key.c_str());
@@ -1826,7 +1867,8 @@ static int cfg_set(const std::string& key, int32_t val) {
  * the daemon itself can no longer parse: reject those instead of writing them. */
 static int cfg_set_str(const std::string& key, const std::string& val) {
     const bool is_xr = key == "xr_match";
-    if (!is_xr && key != "desktop_match") {
+    const bool is_imu_dev = key == "xr_imu_gyro" || key == "xr_imu_accel";
+    if (!is_xr && !is_imu_dev && key != "desktop_match") {
         LOGE("config set: unknown string key '%s'", key.c_str());
         return -1;
     }
@@ -1835,12 +1877,36 @@ static int cfg_set_str(const std::string& key, const std::string& val) {
         return -2;
     }
     for (unsigned char c : val) {
+        /* device paths only: no quotes/backslashes (the file is not escaped),
+         * and nothing that could not plausibly be a path */
+        if (is_imu_dev) {
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                            (c >= '0' && c <= '9') || c == '/' || c == '.' || c == '_' ||
+                            c == '-' || c == ':' || c == '+' || c == ',';
+            if (!ok) {
+                LOGE("config set: %s rejected (byte 0x%02x not allowed in a path)",
+                     key.c_str(), c);
+                return -3;
+            }
+            continue;
+        }
         if (c < 0x20 || c == 0x7f || c == '"' || c == '\\') {
             LOGE("config set: %s rejected (byte 0x%02x not allowed)", key.c_str(), c);
             return -3;
         }
     }
-    if (is_xr) {
+    if (is_imu_dev) {
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            if (key == "xr_imu_gyro")
+                snprintf(g_xr_imu_gyro, sizeof(g_xr_imu_gyro), "%s", val.c_str());
+            else
+                snprintf(g_xr_imu_accel, sizeof(g_xr_imu_accel), "%s", val.c_str());
+            xr_configure_locked();   /* re-detects the device */
+            cfg_save_locked();
+        }
+        xr_notify_windows();
+    } else if (is_xr) {
         {
             std::lock_guard<std::mutex> lk(g_cfg_lock);
             snprintf(g_xr_match, sizeof(g_xr_match), "%s", val.c_str());
@@ -2464,18 +2530,24 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         else if (key == "xr_k2") v = g_xr_k2;
         else if (key == "xr_ca") v = g_xr_ca;
         else if (key == "xr_predict") v = g_xr_predict;
+        else if (key == "xr_imu") v = g_xr_imu;
+        else if (key == "xr_imu_hz") v = g_xr_imu_hz;
         else if (key == "desktop_mode") {
             std::lock_guard<std::mutex> lk(g_cfg_lock);
             v = g_desktop_mode;
         }
-        else if (key == "xr_match" || key == "desktop_match") {
+        else if (key == "xr_match" || key == "desktop_match" || key == "xr_imu_gyro" ||
+                 key == "xr_imu_accel") {
             /* the string half of the config — answered as a string16, read by
              * WlBinder.configGetStr (a numeric read of these keys stays -1) */
             char tmp[256];
             {
                 std::lock_guard<std::mutex> lk(g_cfg_lock);
                 snprintf(tmp, sizeof(tmp), "%s",
-                         key == "xr_match" ? g_xr_match : g_desktop_match);
+                         key == "xr_match" ? g_xr_match
+                         : key == "desktop_match" ? g_desktop_match
+                         : key == "xr_imu_gyro" ? g_xr_imu_gyro
+                                                 : g_xr_imu_accel);
             }
             AParcel_writeString(out, tmp, (int32_t)strlen(tmp));
             return STATUS_OK;

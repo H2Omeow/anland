@@ -5,6 +5,7 @@ import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.os.Binder;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Parcel;
@@ -15,6 +16,7 @@ import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -1794,6 +1796,27 @@ public class AwlWindowActivity extends Activity {
                 + (xrWanted ? "" : " (tracking off)"));
         if (xrWanted) startXr();
         else stopXr();
+        applyFrameRate(refresh);
+    }
+
+    /**
+     * Ask the panel for the compositor's refresh rate rather than whatever the
+     * system picked for a background-ish 2D activity. This is a hint: the
+     * display stack only honours it when it supports the mode and the session
+     * is allowed to switch, so a 90 Hz request on a 72 Hz panel just does
+     * nothing. Frames still pace themselves on the guest's own vsync.
+     */
+    private void applyFrameRate(int refresh) {
+        if (refresh <= 0 || id < 0) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;   /* API 30 */
+        try {
+            Surface s = sv.getHolder().getSurface();
+            if (s == null || !s.isValid()) return;
+            s.setFrameRate(refresh, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+            Log.i(TAG, "win " + id + ": asked for " + refresh + " Hz");
+        } catch (Throwable t) {
+            Log.w(TAG, "win " + id + ": setFrameRate(" + refresh + ") rejected: " + t);
+        }
     }
 
     private void startXr() {

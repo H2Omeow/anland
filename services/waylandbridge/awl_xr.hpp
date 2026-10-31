@@ -76,6 +76,13 @@ void awl_xr_set_pose(const float quat[4], const float pos[3], uint64_t sample_ns
 void awl_xr_set_pose_vel(const float quat[4], const float pos[3],
                          const float ang_vel[3], uint64_t sample_ns, uint32_t period_ns);
 
+/* Head pose produced by the daemon's own IMU reader (awl_imu.cpp), which reads
+ * the raw sensors as root instead of waiting for an Activity. Priority is
+ * external provider > this > Activity: while root IMU samples keep arriving,
+ * the Activity's poses are dropped (two sources at different rates fight). */
+void awl_xr_submit_imu(const float quat[4], const float ang_vel[3],
+                       uint64_t sample_ns, uint32_t period_ns);
+
 /* Controller/input snapshot (binder T_XR_INPUT): 2 controllers, the same
  * field order the Activity writes. Republished as anland-xr-input. */
 void awl_xr_set_input(const int32_t* ints, size_t nints);

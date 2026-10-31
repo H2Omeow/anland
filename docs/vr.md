@@ -49,6 +49,49 @@ Android                          host daemon                container
 - A Vulkan ICD that works in the container (Turnip/KGSL). The layer's whole
   reason to exist is the turnip case `VK_KHR_display` mishandles.
 
+## Root, sensors and what it actually buys you
+
+anland already runs its daemon as root — that is the premise of the whole
+design, not an extra step VR asks for. So this tree takes the root path by
+default (`xr_imu = 1`): `waylandbridge` opens the gyroscope and accelerometer
+itself and integrates them, instead of leaning on the orientation Android fuses
+for a normal app.
+
+What that changes:
+
+- **Sampling.** A 2D activity usually gets `SENSOR_DELAY_GAME` fused output at
+  ~50 Hz after system fusion; the raw IIO device runs at 200–1000 Hz, which is
+  what makes prediction meaningful. `xr_imu_hz` sets the reader's rate (the
+  device's own `sampling_frequency` is raised to match when it can be).
+- **Access.** A headset may hand a plain window nothing at all (no game rotation
+  vector, or a frozen one). Reading the device directly sidesteps that policy
+  question entirely.
+- **One less hop.** The pose goes daemon → seqlock → guest driver, without the
+  binder round trip through the activity.
+
+What it does **not** change:
+
+- **Still 3DoF.** No amount of root turns a gyro into a position. Real 6DoF needs
+  a pose source — camera VIO, the headset's own tracking, or a runtime bridge —
+  and the hand-off for that is `anland-xr-pose-ext` (below). Root makes it
+  *possible* to run a camera + IMU tracker in the daemon later; this tree does
+  not ship one.
+- **No direct mode.** Presenting straight to the panel needs
+  `IVRDriverDirectModeComponent` and a swapchain the compositor can scan out,
+  which contradicts "SurfaceFlinger still composes everything". That stays a
+  deliberate non-goal, root or not.
+
+The daemon logs which device it picked — `logcat -s anland-imu`:
+
+```
+imu: reading iio:device1 (gyro) and iio:device1 (accel) at 200 Hz
+```
+
+If auto-detection picks the wrong one, set `xr_imu_gyro` / `xr_imu_accel` to
+a concrete path — `ls /sys/bus/iio/devices/*/name` tells you what the kernel
+calls them. `xr_imu = 0` falls back to the activity's fused pose; the external
+6DoF file, when present and fresh, outranks both.
+
 ## Turning it on
 
 Everything here is also on the phone: **Window Settings → VR**. The settings
@@ -92,6 +135,9 @@ Keys, all optional apart from `xr_enabled`:
 | `xr_k1`, `xr_k2` | `0` | −1000–2000 | per-mille barrel distortion coefficients; `0` = no lens correction, straight pass-through |
 | `xr_ca` | `0` | 0–100 | per-mille chromatic aberration compensation |
 | `xr_predict` | `0` | 0–120 | milliseconds of head motion extrapolated past the newest pose sample; `0` = no prediction |
+| `xr_imu` | `0` | 0–1 | read the raw gyroscope/accelerometer as root instead of the fused pose Android gives a 2D activity |
+| `xr_imu_hz` | `200` | 50–1000 | sensor sampling rate for that reader |
+| `xr_imu_gyro`, `xr_imu_accel` | `""` | — | device to read; empty = auto-detect. Accepts a sysfs path, a `/dev` path, or part of the device name |
 | `xr_match` | `vrcompositor,steamvr` | — | comma-separated, case-insensitive substrings that mark a window as XR |
 
 `xr_k1`/`xr_k2` are for cardboard-style lenses; for AR glasses, or a phone
@@ -120,7 +166,9 @@ non-zero, unlike the glasses case.
   "xr_k1": 220,
   "xr_k2": 40,
   "xr_ca": 10,
-  "xr_predict": 20
+  "xr_predict": 20,
+  "xr_imu": 1,
+  "xr_imu_hz": 200
 }
 ```
 
@@ -139,12 +187,16 @@ non-zero, unlike the glasses case.
 - `xr_predict = 20` extrapolates the pose 20 ms using the IMU's angular
   velocity. Raise it while turning your head: too little and the world drags
   behind, too much and it overshoots. 0 turns prediction off.
-- Horizon OS hands raw IMU to VR apps through OpenXR, not to plain 2D
-  activities. If `./anland-steamvr status` shows a `seq` that keeps counting
-  while the quaternion stays at `0,0,0,1`, the headset is refusing the sensor:
-  set `xr_mode = 1` and use SteamVR's seated mode, feed poses from an OpenXR
-  bridge through `anland-xr-pose-ext` (below), or root the device far enough to
-  expose `SensorManager` to the host APK. Everything else (SBS output,
+- `xr_imu = 1` is what makes that angular velocity worth anything: a 2D window
+  on Horizon OS can be given no orientation at all, and the fused pose it does
+  get is capped at ~50 Hz. The daemon reads the headset's own IIO devices
+  instead, at 200 Hz by default — see [Root, sensors and what it actually buys
+  you](#root-sensors-and-what-it-actually-buys-you).
+- If `./anland-steamvr status` shows a `seq` that keeps counting while the
+  quaternion stays at `0,0,0,1`, check that `xr_imu` is on and that
+  `logcat -s anland-imu` found a device. If the headset still yields nothing,
+  set `xr_mode = 1` and use SteamVR's seated mode, or feed poses from an OpenXR
+  bridge through `anland-xr-pose-ext` (below). Everything else (SBS output,
   distortion, controllers) works either way.
 - Root is a hard requirement in any case: `anland` is a KernelSU/SukiSU module
   plus a binder daemon in the `awl_daemon` domain.
@@ -214,12 +266,13 @@ Rules the daemon applies:
 
 - A pose only wins when `sample_ns` is newer than the pose it already has, so
   publishing the same sample twice is harmless.
-- While the file keeps updating (within 250 ms), IMU poses from `AwlXrSession`
-  are dropped — two sources at different rates would fight and the
-  reprojection would jitter.
+- While the file keeps updating (within 250 ms), poses from the root IMU reader
+  and from `AwlXrSession` are both dropped — sources at different rates would
+  fight and the reprojection would jitter.
 - `tracking = 0`, a missing file, or 250 ms of silence hands the pose back to
-  the IMU session. Nothing needs to be torn down; the next IMU sample just wins
-  again.
+  whatever was underneath: the root IMU reader if `xr_imu = 1`, else the
+  activity's fused pose. Nothing needs to be torn down; the next sample from
+  that source just wins again.
 - The file is read `O_RDONLY` and never created by the daemon — the provider
   owns its lifetime. Delete it to switch back to 3DoF for good.
 
@@ -233,10 +286,13 @@ uses them instead of the head-plus-shoulder fallback.
   the whole chain is alive. `display: <missing>` means the daemon is not running
   with `xr_enabled=1` (or never restarted after the edit).
 - `/data/local/tmp/awl_daemon.log` — one `xr: window <id> …` line per XR window,
-  `xr: render target follows the window: …` when a surface size arrives, and
+  `xr: render target follows the window: …` when a surface size arrives,
+  `xr: root IMU on (…)` when the root reader started, `xr: root IMU provider is
+  live - Activity poses are paused` on the first accepted sample, and
   `xr: external pose provider is live …` when `anland-xr-pose-ext` takes over.
+- `logcat -s anland-imu` — which IIO device the daemon picked and at what rate.
 - `logcat -s AwlWindowActivity` on the host — `applyXrState` logs the geometry
-  it was handed.
+  it was handed, and `asked for <n> Hz` whether the panel accepted the mode.
 - `cd anlandx/xr && ./build.sh --test` — checks the display/pose/input wire
   format on any Linux box, no phone involved.
 - If SteamVR starts but the HMD tab shows "no headset", check the driver
@@ -249,8 +305,8 @@ Each of the original limits, and where it stands now:
 
 | Limit | Status |
 | --- | --- |
-| **3DoF only** | **Narrowed.** A 6DoF source can publish `anland-xr-pose-ext` and the daemon prefers it, positions included; without such a source the IMU session is still orientation-only. anland does not add SLAM itself. |
-| **High pose latency** | **Narrowed.** `xr_predict` (0–120 ms) extrapolates with angular velocity both in the driver's `vecAngularVelocity` and in the reprojection. It hides pose *transport* latency; the Android sensor pipeline and the extra host composite remain. |
+| **3DoF only** | **Narrowed.** Tracking now reads the raw gyro/accelerometer as root (`xr_imu`) at up to 1 kHz, so neither sensor throttling nor the headset's policy on 2D windows applies. It is still orientation-only: real 6DoF needs a pose source, and the hand-off for one is `anland-xr-pose-ext`. |
+| **High pose latency** | **Narrowed.** `xr_predict` (0–120 ms) extrapolates with angular velocity both in the driver's `vecAngularVelocity` and in the reprojection, and the root reader removes the activity→binder hop from the pose path. The host composite still costs a frame. |
 | **One XR window** | **Narrowed.** The reprojection reference is per window now, so a second XR window reprojects against its own previous frame instead of double-rotating. All XR windows still share one head pose, and only one can sensibly be the headset view. |
 | **The window is the render target** | **Narrowed.** With `xr_eye_w/h = 0` the eye target follows the XR window's surface size and is re-published on every resize; a mismatched aspect ratio logs one warning instead of silently stretching. SteamVR still decides the swapchain size. |
 | **Controllers are a gamepad** | **Partly.** The wire format and driver accept real per-controller poses; stock Android has no tracker that produces them. Buttons/axes map to the `vive_controller` profile either way. |

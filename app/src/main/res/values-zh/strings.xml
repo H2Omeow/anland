@@ -64,6 +64,11 @@
     <string name="xr_predict">姿态预测</string>
     <string name="xr_predict_tip">姿态预测（毫秒, 在最新采样之外外推头部运动; 0 = 关）:</string>
     <string name="xr_predict_off">关</string>
+    <string name="xr_imu">以 root 直读传感器</string>
+    <string name="xr_imu_tip">头部追踪来源。关：使用 Android 交给普通应用的融合姿态（有限流，且头显可能根本不对 2D 窗口开放）。开：守护进程以 root 直接读原始陀螺仪与加速度计自行积分，这才是头显上能指望的路径。</string>
+    <string name="xr_imu_hz">采样率</string>
+    <string name="xr_imu_gyro_tip">陀螺仪设备（留空 = 自动探测；可填 /sys/bus/iio/devices/iio:device1 这类 sysfs 路径、/dev 路径，或设备名的一部分）：</string>
+    <string name="xr_imu_accel_tip">加速度计设备（留空 = 自动探测；写法同上）：</string>
     <string name="xr_ext_pose_tip">6DoF: 若 anland-xr-pose 旁边出现 anland-xr-pose-ext（由 ARCore/OpenXR 桥写入）, 其姿态会自动取代手机 IMU; 没有该文件时就是 3DoF 会话。</string>
     <string name="xr_match_tip">被当作 XR 窗口的窗口标题（逗号分隔, 不区分大小写）:</string>
     <string name="xr_preset_quest">Quest 3S 预设</string>

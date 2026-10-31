@@ -360,6 +360,15 @@ public class WlSettingsActivity extends Activity {
 
         questPresetRow();
 
+        /* ---- head tracking source: the daemon runs as root, so it can read the
+         *      raw IIO gyro/accelerometer instead of the throttled fused pose
+         *      Android hands to a 2D activity — docs/vr.md ---- */
+        note(R.string.xr_imu_tip);
+        switchRow(R.string.xr_imu, "xr_imu", false);
+        sliderRow(R.string.xr_imu_hz, "xr_imu_hz", 50, 500, 200, 10, v -> v + " Hz");
+        textRow("xr_imu_gyro", R.string.xr_imu_gyro_tip);
+        textRow("xr_imu_accel", R.string.xr_imu_accel_tip);
+
         note(R.string.xr_ext_pose_tip);
 
         textRow("xr_match", R.string.xr_match_tip);
@@ -526,8 +535,9 @@ public class WlSettingsActivity extends Activity {
         hp.setOnValueChangedListener(ncl);
     }
 
-    /** string config (a title match list): TEXT + Apply, because the daemon
-     *  writes config.json unescaped and rejects quotes / backslashes */
+    /** string config (a title match list, or an IMU device path): TEXT + Apply,
+     *  because the daemon writes config.json unescaped and rejects quotes /
+     *  backslashes (paths additionally allow only [A-Za-z0-9/._:+,]) */
     private void textRow(String key, int tipRes) {
         TextView tip = new TextView(this);
         tip.setText(tipRes);
@@ -574,6 +584,8 @@ public class WlSettingsActivity extends Activity {
             WlBinder.configSet("xr_k2", 40);
             WlBinder.configSet("xr_ca", 10);
             WlBinder.configSet("xr_predict", 20);
+            WlBinder.configSet("xr_imu", 1);
+            WlBinder.configSet("xr_imu_hz", 200);
             recreate();   /* rebuild the page from the daemon's new values */
         });
         root.addView(b);

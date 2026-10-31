@@ -61,6 +61,12 @@ struct state {
     uint64_t ext_ns = 0;
     bool ext_logged = false;
 
+    /* last pose produced by the daemon's own root-side IMU reader. Also a
+     * "provider is live" marker: while it keeps updating, the Activity's IMU
+     * poses are ignored, so the two never interleave. */
+    uint64_t imu_ns = 0;
+    bool imu_logged = false;
+
     /* pose the previous XR frame of a given window was drawn with. Per window:
      * two XR windows can be showing frames composed at different instants, and
      * reprojecting one with the other's reference would double-rotate it. */
@@ -644,12 +650,22 @@ bool ext_fresh_locked(void) {
     return now > g.ext_ns && (now - g.ext_ns) < kPoseFreshNs;
 }
 
+/* True while the daemon's own IMU reader is still delivering poses. */
+bool imu_fresh_locked(void) {
+    if (!g.imu_ns) return false;
+    const uint64_t now = now_ns();
+    return now > g.imu_ns && (now - g.imu_ns) < kPoseFreshNs;
+}
+
 void set_pose_common(const float quat[4], const float pos[3], const float ang_vel[3],
                      uint64_t sample_ns, uint32_t period_ns) {
     std::lock_guard<std::mutex> lk(g.lock);
     maybe_take_external_locked();
     /* an external provider owns the pose while it is live */
     if (ext_fresh_locked()) return;
+    /* the root IMU reader outranks the Activity: it samples raw channels at a
+     * higher rate and does not depend on the Activity being foreground */
+    if (imu_fresh_locked()) return;
     double q[4] = {quat[0], quat[1], quat[2], quat[3]};
     /* normalize (binder floats are not guaranteed unit length) */
     double n = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
@@ -679,6 +695,35 @@ void awl_xr_set_pose(const float quat[4], const float pos[3], uint64_t sample_ns
 void awl_xr_set_pose_vel(const float quat[4], const float pos[3], const float ang_vel[3],
                          uint64_t sample_ns, uint32_t period_ns) {
     set_pose_common(quat, pos, ang_vel, sample_ns, period_ns);
+}
+
+void awl_xr_submit_imu(const float quat[4], const float ang_vel[3], uint64_t sample_ns,
+                       uint32_t period_ns) {
+    if (!quat) return;
+    std::lock_guard<std::mutex> lk(g.lock);
+    if (!g.cfg.enabled || g.cfg.mode < 1) return;
+    /* An external 6DoF provider still wins: it knows things the IMU cannot
+     * (translation), and mixing the two would make the reprojection jitter. */
+    if (ext_fresh_locked()) return;
+    if (sample_ns && g.imu_ns && sample_ns <= g.imu_ns) return;
+
+    double q[4] = {quat[0], quat[1], quat[2], quat[3]};
+    double n = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (n < 1e-6) { q[0] = q[1] = q[2] = 0.0; q[3] = 1.0; }
+    else for (int i = 0; i < 4; i++) q[i] /= n;
+
+    for (int i = 0; i < 4; i++) g.q[i] = q[i];
+    if (ang_vel) for (int i = 0; i < 3; i++) g.ang_vel[i] = ang_vel[i];
+    /* root IMU is 3DoF: no translation, so the position stays where it was */
+    g.pose_ns = sample_ns ? sample_ns : now_ns();
+    g.imu_ns = g.pose_ns;
+    g.period_ns = period_ns;
+    g.pose_ok = true;
+    if (!g.imu_logged) {
+        g.imu_logged = true;
+        LOGI("xr: root IMU provider is live - Activity poses are paused");
+    }
+    publish_pose_locked();
 }
 
 void awl_xr_set_input(const int32_t* v, size_t n) {

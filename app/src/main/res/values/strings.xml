@@ -64,6 +64,11 @@
     <string name="xr_predict">Pose prediction</string>
     <string name="xr_predict_tip">Pose prediction (milliseconds of head motion extrapolated past the newest sample; 0 = off):</string>
     <string name="xr_predict_off">off</string>
+    <string name="xr_imu">Read sensors as root</string>
+    <string name="xr_imu_tip">Head tracking source. Off: the fused orientation Android hands to a normal app (throttled, and a headset may refuse it entirely to a 2D window). On: the daemon reads the raw gyroscope and accelerometer itself and integrates them, which is what a headset can be expected to allow.</string>
+    <string name="xr_imu_hz">Sensor rate</string>
+    <string name="xr_imu_gyro_tip">Gyroscope device (empty = auto-detect; accepts a sysfs path such as /sys/bus/iio/devices/iio:device1, a /dev path, or part of the device name):</string>
+    <string name="xr_imu_accel_tip">Accelerometer device (empty = auto-detect; same forms as above):</string>
     <string name="xr_ext_pose_tip">6DoF: if a file anland-xr-pose-ext appears next to anland-xr-pose (written by an ARCore/OpenXR bridge), its poses replace the phone IMU automatically. Without it the session is 3DoF.</string>
     <string name="xr_match_tip">Window titles treated as the XR window (comma separated, case-insensitive):</string>
     <string name="xr_preset_quest">Quest 3S preset</string>

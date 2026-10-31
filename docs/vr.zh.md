@@ -46,6 +46,42 @@ Android                          host daemon                container
 - 容器里有一个能用的 Vulkan ICD（Turnip/KGSL）。这个层存在的唯一原因，就是
   Turnip 处理不好的 `VK_KHR_display`。
 
+## root、传感器，以及它到底买到了什么
+
+anland 的守护进程本来就是 root 跑的——这是整个设计的前提，不是 VR 额外要求的一步。
+所以本仓库默认就走 root 路径（`xr_imu = 1`）：`waylandbridge` 自己打开陀螺仪和
+加速度计并做积分，而不是依赖 Android 给普通应用的融合姿态。
+
+变的是这些：
+
+- **采样率。** 2D Activity 通常拿到的是系统融合后的 `SENSOR_DELAY_GAME`，约 50 Hz；
+  原始 IIO 设备跑 200–1000 Hz，这才让“预测”有意义。`xr_imu_hz` 设读取线程的频率
+  （设备自己的 `sampling_frequency` 在能写的时候也会被抬到同一档）。
+- **可用性。** 头显可能干脆不给普通窗口任何姿态（没有 game rotation vector，或给了
+  一个冻住的）。直接读设备就绕开了这个策略问题。
+- **少一次跳转。** 姿态走 守护进程 → seqlock → guest 驱动，不再经过 Activity 的
+  binder 往返。
+
+不变的：
+
+- **仍然是 3DoF。** root 再多也不能把陀螺仪变成位置。真正的 6DoF 需要一个姿态源——
+  相机 VIO、头显自己的追踪，或某个运行时的桥——对接口子是 `anland-xr-pose-ext`
+  （见下文）。root 让“以后在守护进程里跑相机+IMU 追踪器”成为**可能**，本仓库不带
+  这样的追踪器。
+- **仍然没有 direct mode。** 直接往面板上呈现需要 `IVRDriverDirectModeComponent` 和
+  一条合成器能扫出的 swapchain，这和“SurfaceFlinger 仍然是唯一的合成器”直接矛盾。
+  有没有 root 都是刻意不做的。
+
+守护进程会打印它挑了哪个设备——`logcat -s anland-imu`：
+
+```
+imu: reading iio:device1 (gyro) and iio:device1 (accel) at 200 Hz
+```
+
+如果自动探测挑错了，把 `xr_imu_gyro` / `xr_imu_accel` 设成具体路径——
+`ls /sys/bus/iio/devices/*/name` 能看到内核给它们的名字。`xr_imu = 0` 回退到 Activity
+的融合姿态；外部 6DoF 文件存在且新鲜时，优先级高于这两者。
+
 ## 打开它
 
 这些也都能在手机上改：**窗口设置 → VR**。设置页通过 binder
@@ -86,6 +122,9 @@ shader 里的 `k1 = 0.15`。
 | `xr_k1`、`xr_k2` | `0` | −1000–2000 | 千分比的桶形畸变系数；`0` = 不做镜头校正，直接透传 |
 | `xr_ca` | `0` | 0–100 | 千分比的色散补偿 |
 | `xr_predict` | `0` | 0–120 | 在最新姿态之外外推多少毫秒的头部运动；`0` = 不预测 |
+| `xr_imu` | `0` | 0–1 | 以 root 直读原始陀螺仪/加速度计，而不用 Android 给 2D Activity 的融合姿态 |
+| `xr_imu_hz` | `200` | 50–1000 | 这个读取线程的采样率 |
+| `xr_imu_gyro`、`xr_imu_accel` | `""` | — | 要读的设备；留空 = 自动探测。可填 sysfs 路径、`/dev` 路径，或设备名的一部分 |
 | `xr_match` | `vrcompositor,steamvr` | — | 逗号分隔、不区分大小写的子串，命中即视为 XR 窗口 |
 
 `xr_k1`/`xr_k2` 是给 cardboard 那种透镜用的；AR 眼镜、或者直接看手机屏幕时，
@@ -112,7 +151,9 @@ Quest 3S 是双面板 Android 设备：每眼 1832×1920，默认 90 Hz（可开
   "xr_k1": 220,
   "xr_k2": 40,
   "xr_ca": 10,
-  "xr_predict": 20
+  "xr_predict": 20,
+  "xr_imu": 1,
+  "xr_imu_hz": 200
 }
 ```
 
@@ -126,12 +167,13 @@ Quest 3S 是双面板 Android 设备：每眼 1832×1920，默认 90 Hz（可开
   把 `k1` 一点点加大，直到边缘不再向外鼓。`xr_ca` 用来压掉边缘的红蓝镶边。
 - `xr_predict = 20` 表示用 IMU 的角速度把姿态外推 20 ms。转头时调它：
   太小世界会“跟得慢”，太大就会过冲。0 表示关闭预测。
-- Horizon OS 只通过 OpenXR 把原始 IMU 交给 VR 应用，不会给普通 2D Activity。
-  如果 `./anland-steamvr status` 显示 `seq` 一直在涨、而四元数始终是
-  `0,0,0,1`，说明头显不给传感器：可以把 `xr_mode` 设成 `1` 用 SteamVR 的
-  座椅模式，或让 OpenXR 桥通过 `anland-xr-pose-ext`（见下）喂姿态，或者把设备
-  root 到能把 `SensorManager` 暴露给宿主 APK 的程度。其它部分（SBS 输出、
-  畸变、手柄）在任何一种情况下都能用。
+- `xr_imu = 1` 才让这个角速度有意义：Horizon OS 可能完全不给 2D 窗口朝向，而它
+  偶尔给的融合姿态也就 ~50 Hz。守护进程改为直接读头显自己的 IIO 设备，默认 200 Hz
+  ——见 [root、传感器，以及它到底买到了什么](#root传感器以及它到底买到了什么)。
+- 如果 `./anland-steamvr status` 显示 `seq` 一直在涨、而四元数始终是 `0,0,0,1`，
+  先确认 `xr_imu` 开着、`logcat -s anland-imu` 里挑到了设备。再不行可以把 `xr_mode`
+  设成 `1` 用 SteamVR 的座椅模式，或让 OpenXR 桥通过 `anland-xr-pose-ext`（见下）
+  喂姿态。其它部分（SBS 输出、畸变、手柄）在任何一种情况下都能用。
 - 无论如何 root 都是硬前提：`anland` 是一个 KernelSU/SukiSU 模块，加上一个跑在
   `awl_daemon` 域的 binder 守护进程。
 
@@ -190,10 +232,11 @@ anland_xr_seq_end(&blk->seq);
 守护进程按这些规则处理：
 
 - 只有 `sample_ns` 比已有姿态更新时才生效，所以同一个采样重复写是无害的。
-- 只要这个文件还在更新（250 ms 内），`AwlXrSession` 的 IMU 姿态就会被丢弃——
-  两个不同频率的源混在一起会互相打架，重投影就会抖。
-- `tracking = 0`、文件消失、或静默超过 250 ms，姿态就交还给 IMU 会话。不需要
-  拆任何东西，下一个 IMU 采样自然又生效。
+- 只要这个文件还在更新（250 ms 内），root IMU 读取线程和 `AwlXrSession` 的姿态
+  都会被丢弃——不同频率的源混在一起会互相打架，重投影就会抖。
+- `tracking = 0`、文件消失、或静默超过 250 ms，姿态就交还给下面那一层：`xr_imu = 1`
+  时是 root IMU 读取线程，否则是 Activity 的融合姿态。不需要拆任何东西，那一层的
+  下一个采样自然又生效。
 - 文件由守护进程以 `O_RDONLY` 打开、并且**永远不会创建**——它的生命周期归提供者。
   想永久回到 3DoF，删掉它就行。
 
@@ -206,9 +249,13 @@ anland_xr_seq_end(&blk->seq);
   `pose: seq=… quat=(…)`，说明整条链是活的。`display: <missing>` 说明守护进程
   没带 `xr_enabled=1` 在跑（或者改完之后没重启）。
 - `/data/local/tmp/awl_daemon.log` —— 每个 XR 窗口一行 `xr: window <id> …`；
-  收到 surface 尺寸时有 `xr: render target follows the window: …`；
-  `anland-xr-pose-ext` 接管时有 `xr: external pose provider is live …`。
-- 宿主上 `logcat -s AwlWindowActivity` —— `applyXrState` 会打印它拿到的几何参数。
+  收到 surface 尺寸时有 `xr: render target follows the window: …`；root 读取启动时
+  有 `xr: root IMU on (…)`，第一个被采纳的采样有 `xr: root IMU provider is live -
+  Activity poses are paused`；`anland-xr-pose-ext` 接管时有
+  `xr: external pose provider is live …`。
+- `logcat -s anland-imu` —— 守护进程挑了哪个 IIO 设备、跑多少 Hz。
+- 宿主上 `logcat -s AwlWindowActivity` —— `applyXrState` 会打印它拿到的几何参数，
+  `asked for <n> Hz` 表示面板是否接受了这个模式。
 - `cd anlandx/xr && ./build.sh --test` —— 在任何 Linux 机器上检查显示/姿态/输入
   的文件格式，不需要手机。
 - 如果 SteamVR 起来了、但 HMD 页显示 “no headset”，检查驱动目录名：SteamVR 找的是
@@ -220,8 +267,8 @@ anland_xr_seq_end(&blk->seq);
 
 | 限制 | 现状 |
 | --- | --- |
-| **只有 3DoF** | **已收窄。** 任何 6DoF 源都可以写 `anland-xr-pose-ext`，守护进程优先用它的姿态（含位置）；没有这样的源时，IMU 会话仍然只有朝向。anland 自己不实现 SLAM。 |
-| **姿态延迟高** | **已收窄。** `xr_predict`（0–120 ms）用角速度外推，驱动里的 `vecAngularVelocity` 和重投影都吃这个。它掩盖的是姿态**传输**延迟；Android 传感器管线和多一层宿主合成的开销仍在。 |
+| **只有 3DoF** | **已收窄。** 追踪改成以 root 直读原始陀螺仪/加速度计（`xr_imu`），最高 1 kHz，既不受传感器限流、也不受头显对 2D 窗口的策略限制。但它仍然只有朝向：真正的 6DoF 需要一个姿态源，对接口子是 `anland-xr-pose-ext`。 |
+| **姿态延迟高** | **已收窄。** `xr_predict`（0–120 ms）用角速度外推，驱动里的 `vecAngularVelocity` 和重投影都吃这个；root 读取还去掉了姿态路径上 Activity→binder 那一跳。宿主合成仍要花一帧。 |
 | **只能有一个 XR 窗口** | **已收窄。** 重投影参考帧改成按窗口保存，第二个 XR 窗口按自己的上一帧重投影，不会重复旋转。所有 XR 窗口仍共享同一个头姿，实际能当头显视图的也只有一个。 |
 | **窗口就是渲染目标** | **已收窄。** `xr_eye_w/h = 0` 时每眼目标跟随 XR 窗口的 surface 尺寸，每次改变都重发；宽高比不匹配时打一条警告，而不是默默拉伸。swapchain 尺寸仍由 SteamVR 决定。 |
 | **手柄只是伪装成手柄** | **部分解决。** 文件格式和驱动都接受真实的手柄位姿；但原生 Android 没有能产生这些位姿的追踪源。按键/摇杆在两种情况下都映射到 `vive_controller` 档位。 |
