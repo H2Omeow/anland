@@ -1,0 +1,159 @@
+#!/bin/bash
+# anland-desktop - run a nested desktop compositor inside an anland window
+#
+# anland makes every Wayland toplevel its own Android window. A desktop
+# compositor (KWin, Weston, Sway, Mutter) is therefore a single guest window
+# that owns the whole screen: it connects to the anland host as a Wayland
+# client (its "nested" backend), asks the host for a surface, and draws a
+# complete desktop into it. The host advertises what that backend needs:
+#
+#   wl_compositor/wl_shm        - shared-memory buffers (software path)
+#   zwp_linux_dmabuf_v1 v3      - GPU buffers, LINEAR only (Turnip/KGSL)
+#   wl_output v4 + zxdg_output  - the virtual screen's size, name, refresh
+#   wp_presentation v1          - real "frame N hit the screen at T" feedback
+#   xdg_wm_base + wl_seat       - window roles + keyboard/pointer/touch
+#
+# In "desktop session" mode (desktop_mode=1 in the daemon config, matched by
+# window title) the host also pins the window to the panel size and marks it
+# FULLSCREEN|MAXIMIZED, so the compositor treats the host as a monitor rather
+# than a floating window manager to negotiate with.
+#
+# Usage:
+#   anland-desktop [--compositor kwin|weston|sway|mutter] [--print-env]
+#   anland-desktop --help
+#
+# Run it from the anland session (after `anland-session.sh` has exported
+# ~/.anlandx-env), or let it source that file itself.
+
+set -u
+
+SELF=anland-desktop
+COMPOSITOR=""
+PRINT_ENV=0
+
+usage() {
+    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --compositor)     COMPOSITOR="${2:-}"; shift 2 ;;
+        --compositor=*)   COMPOSITOR="${1#*=}"; shift ;;
+        --print-env)      PRINT_ENV=1; shift ;;
+        -h|--help)        usage ;;
+        *) echo "$SELF: unknown argument '$1' (try --help)" >&2; exit 2 ;;
+    esac
+done
+
+# ---- session environment -------------------------------------------------
+# The anland session wrote ~/.anlandx-env (XDG_RUNTIME_DIR, WAYLAND_DISPLAY,
+# DBUS_SESSION_BUS_ADDRESS, PATH, maybe PULSE_SERVER). Source it unless the
+# caller already exported a Wayland display, so this works both from
+# `anland-session.sh` and from a fresh adb shell.
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -f "$HOME/.anlandx-env" ]; then
+    # shellcheck disable=SC1091
+    . "$HOME/.anlandx-env"
+fi
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "$SELF: no WAYLAND_DISPLAY - start the anland session first" \
+         "(bash anland-session.sh) or export it yourself" >&2
+    exit 1
+fi
+[ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="$HOME/.anland/runtime"
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null
+
+# ---- pick a compositor ---------------------------------------------------
+have() { command -v "$1" >/dev/null 2>&1; }
+
+if [ -z "$COMPOSITOR" ]; then
+    for c in kwin_wayland weston sway mutter; do
+        if have "$c"; then COMPOSITOR="$c"; break; fi
+    done
+fi
+
+if [ -z "$COMPOSITOR" ]; then
+    cat >&2 <<EOF
+$SELF: no nested compositor found.
+Install one inside the container, e.g. (Arch):
+  pacman -S kwin plasma-workspace     # KWin (needs qt6 + KF6)
+  pacman -S weston                    # smallest, good for a smoke test
+  pacman -S sway                      # wlroots
+EOF
+    exit 1
+fi
+
+# Nested sessions get their own Wayland socket + X display so they do not
+# collide with the anland session's own Xwayland (the compositor brings its
+# own Xwayland for X11 apps).
+DESK_SOCKET="wayland-desktop"
+DESK_RUNTIME="$XDG_RUNTIME_DIR/anland-desktop"
+mkdir -p "$DESK_RUNTIME"
+chmod 700 "$DESK_RUNTIME"
+export XDG_RUNTIME_DIR="$DESK_RUNTIME"
+
+# Apps launched later inside the nested session source this file.
+ENVFILE="$HOME/.anlanddesk-env"
+cat >"$ENVFILE" <<EOF
+# written by $SELF ($(date -Iseconds 2>/dev/null || date))
+export XDG_RUNTIME_DIR="$DESK_RUNTIME"
+export WAYLAND_DISPLAY="$DESK_SOCKET"
+export DISPLAY="\${DISPLAY:-:1}"
+export PULSE_SERVER="\${PULSE_SERVER:-}"
+EOF
+
+echo "$SELF: compositor=$COMPOSITOR host-display=$WAYLAND_DISPLAY"
+echo "$SELF: nested socket=$DESK_SOCKET  env=$ENVFILE"
+echo "$SELF: for the host to pin this window to the panel, keep"
+echo "       \"desktop_mode\": 1 in /data/adb/modules/anland-awl/config.json"
+echo "       and make sure the window title matches \"desktop_match\""
+echo "       (default: kwin,plasma,weston,sway,mutter,gnome-shell,wayfire)."
+
+if [ "$PRINT_ENV" = 1 ]; then
+    echo
+    echo "export XDG_RUNTIME_DIR=$DESK_RUNTIME"
+    echo "export WAYLAND_DISPLAY=$DESK_SOCKET"
+    exit 0
+fi
+
+# ---- launch --------------------------------------------------------------
+# Every branch passes the HOST display explicitly: the compositor is a client
+# of anland, and anland's socket lives in the session runtime dir.
+case "$COMPOSITOR" in
+    kwin_wayland)
+        # --wayland-display = nested backend (BackendType::Wayland): KWin
+        # renders with GBM + linux-dmabuf into host buffers. KWIN_COMPOSE=Q
+        # falls back to software (shm) when GBM/EGL is unavailable - slow, but
+        # it isolates "does the session start" from "does GPU import work".
+        ARGS=(--wayland-display "$WAYLAND_DISPLAY" --no-lockscreen --xwayland)
+        echo "$SELF: exec kwin_wayland ${ARGS[*]}"
+        exec kwin_wayland "${ARGS[@]}"
+        ;;
+    weston)
+        # wayland backend = nested; --width/--height describe the desktop the
+        # host will show. weston picks the host socket from WAYLAND_DISPLAY.
+        ARGS=(--backend=wayland --socket="$DESK_SOCKET" \
+              --width="${ANLAND_DESK_W:-1280}" --height="${ANLAND_DESK_H:-720}" \
+              --idle-time=0)
+        echo "$SELF: exec weston ${ARGS[*]}"
+        exec weston "${ARGS[@]}"
+        ;;
+    sway)
+        # wlroots nested: WLR_BACKENDS=wayland makes the host the backend.
+        export WLR_BACKENDS=wayland
+        export WLR_LIBINPUT_NO_DEVICES=1
+        export WLR_RENDERER="${WLR_RENDERER:-gles2}"
+        echo "$SELF: exec sway (WLR_BACKENDS=wayland, socket $DESK_SOCKET)"
+        exec sway --unsupported-gpu -c "${SWAY_CONFIG:-/etc/sway/config}"
+        ;;
+    mutter)
+        ARGS=(--nested --wayland)
+        echo "$SELF: exec mutter ${ARGS[*]}"
+        exec mutter "${ARGS[@]}"
+        ;;
+    *)
+        echo "$SELF: unsupported compositor '$COMPOSITOR'" \
+             "(supported: kwin_wayland, weston, sway, mutter)" >&2
+        exit 2
+        ;;
+esac

@@ -173,6 +173,13 @@ int  awl_xwayland_window_serial(uint64_t id, uint64_t* serial);  /* Xwayland
     * that has been associated, 0 = not) — used to pair X-side operations
     * (resize/close) over the mini-wm control channel */
 void awl_window_set_activated(uint64_t id, int activated);   /* ACTIVATED state */
+/* Desktop/session window (docs/desktop.md): a nested compositor's toplevel is
+ * the whole screen, so every configure sent to it also carries
+ * FULLSCREEN|MAXIMIZED. Without that a compositor keeps treating the host as
+ * a floating window manager and re-negotiates its own output geometry on
+ * every resize. Idempotent and independent of the XR window flag. */
+void awl_window_set_session(uint64_t id, int on);
+int  awl_window_is_session(uint64_t id);
 pid_t awl_window_client_pid(uint64_t id);   /* window id → client host pid, read
     * fresh from the connect-time cached credentials (0 = unknown/destroyed) */
 uid_t awl_window_client_uid(uint64_t id);   /* window id → wayland client uid

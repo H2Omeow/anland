@@ -183,6 +183,33 @@ add_custom_command(
           ${AWL_GENERATED}/xwayland-shell-v1-protocol.c
   DEPENDS ${XWLS_XML})
 
+# presentation-time + xdg-output protocol codegen (nested compositor host:
+# wp_presentation gives KWin/weston/sway real presented timestamps + refresh
+# for their render loops, zxdg_output_manager_v1 gives Qt/KWin the logical
+# output geometry and name; awl_present.c / awl_xdgout.c in this dir)
+set(PT_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/presentation-time.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/presentation-time-server-protocol.h
+  COMMAND ${WAYLAND_SCANNER} server-header ${PT_XML}
+          ${AWL_GENERATED}/presentation-time-server-protocol.h
+  DEPENDS ${PT_XML})
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/presentation-time-protocol.c
+  COMMAND ${WAYLAND_SCANNER} private-code ${PT_XML}
+          ${AWL_GENERATED}/presentation-time-protocol.c
+  DEPENDS ${PT_XML})
+set(XDO_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/xdg-output-unstable-v1.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/xdg-output-unstable-v1-server-protocol.h
+  COMMAND ${WAYLAND_SCANNER} server-header ${XDO_XML}
+          ${AWL_GENERATED}/xdg-output-unstable-v1-server-protocol.h
+  DEPENDS ${XDO_XML})
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/xdg-output-unstable-v1-protocol.c
+  COMMAND ${WAYLAND_SCANNER} private-code ${XDO_XML}
+          ${AWL_GENERATED}/xdg-output-unstable-v1-protocol.c
+  DEPENDS ${XDO_XML})
+
 # linux-explicit-synchronization v1 protocol codegen (acquire/release fences
  # per commit, awl_esync.c in this dir; the queue in awl_bufferqueue.c
  # consumes the acquire fence, the renderer produces the release fence)
@@ -323,6 +350,12 @@ add_executable(waylandbridge
   awl_sched.c
   awl_bufferqueue.c
   awl_esync.c
+  awl_present.c
+  awl_xdgout.c
+  ${AWL_GENERATED}/presentation-time-protocol.c
+  ${AWL_GENERATED}/presentation-time-server-protocol.h
+  ${AWL_GENERATED}/xdg-output-unstable-v1-protocol.c
+  ${AWL_GENERATED}/xdg-output-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-protocol.c
   ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/xwayland-shell-v1-protocol.c

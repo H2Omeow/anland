@@ -34,4 +34,44 @@
     <string name="auto_attach">自动 attach 新窗口</string>
     <string name="sc_backend_tip">合成后端（开 = SC/HWC: wayland 图层交由 SurfaceFlinger 合成, 允许时零拷贝扫描输出; 关 = 回退逐窗口 GL 渲染。对之后 attach 的窗口生效）:</string>
     <string name="sc_backend">SC 合成后端（HWC）</string>
+
+    <!-- WlSettingsActivity: VR -->
+    <string name="xr_section">VR（在 XR 窗口里跑 SteamVR）</string>
+    <string name="xr_section_tip">daemon 把标题匹配的那个窗口当成头显画面: 每眼做桶形预畸变, 再用手机 IMU 做时域重投影。需要关掉 SC 后端（畸变在 GL 通路上做）。</string>
+    <string name="xr_enabled">启用 XR 窗口（xr_enabled）</string>
+    <string name="xr_mode_tip">眼睛布局（头显画面怎么装进窗口）:</string>
+    <string name="xr_mode_mono">单眼（一张图铺满屏幕）</string>
+    <string name="xr_mode_sbs_h">左右并列（水平）</string>
+    <string name="xr_mode_sbs_v">上下并列（垂直）</string>
+    <string name="xr_refresh">刷新率</string>
+    <string name="xr_refresh_tip">对外发布的刷新率（0 = 跟随屏幕）:</string>
+    <string name="xr_refresh_panel">跟随屏幕</string>
+    <string name="xr_eye_size_tip">每眼渲染尺寸（0 = 按眼睛布局与屏幕推算）:</string>
+    <string name="xr_eye_w">宽</string>
+    <string name="xr_eye_h">高</string>
+    <string name="xr_fov">视场角</string>
+    <string name="xr_fov_tip">每眼视场角（度）:</string>
+    <string name="xr_ipd">瞳距</string>
+    <string name="xr_ipd_tip">瞳距:</string>
+    <string name="xr_scale">渲染比例</string>
+    <string name="xr_scale_tip">渲染比例 —— 每眼分辨率占屏幕的比例（越低越快、越糊）:</string>
+    <string name="xr_k1">畸变 k1</string>
+    <string name="xr_k1_tip">镜片桶形畸变 k1（0 = 不预畸变; 一直加到透过镜片看直线是直的）:</string>
+    <string name="xr_k2">畸变 k2</string>
+    <string name="xr_k2_tip">镜片桶形畸变 k2（二阶项, 少量即可）:</string>
+    <string name="xr_ca">色散校正</string>
+    <string name="xr_ca_tip">色散校正（0 = 关; 边缘出现红蓝镶边时加大）:</string>
+    <string name="xr_match_tip">被当作 XR 窗口的窗口标题（逗号分隔, 不区分大小写）:</string>
+    <string name="xr_preset_quest">Quest 3S 预设</string>
+    <string name="cfg_str_apply">应用</string>
+    <string name="cfg_str_rejected">daemon 拒绝（不能含引号与反斜杠）</string>
+    <string name="cfg_str_nodaemon">daemon 不可达</string>
+
+    <!-- WlSettingsActivity: desktop -->
+    <string name="desktop_section">桌面（嵌套合成器）</string>
+    <string name="desktop_section_tip">在一个 anland 窗口里跑 KWin、Weston、Sway、Mutter 之类的合成器。会话模式让它在每次 configure 时拿到 FULLSCREEN|MAXIMIZED 并被钉在屏幕尺寸上, 于是它把宿主当成一台显示器。</string>
+    <string name="desktop_mode_tip">会话窗口:</string>
+    <string name="desktop_mode">把匹配的窗口当作桌面会话（desktop_mode）</string>
+    <string name="desktop_match_tip">被当作桌面会话的窗口标题（逗号分隔, 不区分大小写）:</string>
+    <string name="desktop_hint">在容器里启动: 先 anland-session.sh, 再 anland-desktop。</string>
 </resources>

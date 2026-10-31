@@ -21,6 +21,9 @@ public final class WlBinder {
     private static final String DESCRIPTOR = "anland.IHost";
     public static final int T_CFG_GET = 12;   /* (key) → val: read a daemon config (#31) */
     public static final int T_CFG_SET = 13;   /* (key,val) → ok: apply + persist in daemon (#31) */
+    public static final int T_CFG_SET_STR = 21; /* (key,val:string16) → ok: the string half
+                                                 * of the config — the title match lists
+                                                 * xr_match / desktop_match */
 
     private static IBinder s;
 
@@ -90,5 +93,49 @@ public final class WlBinder {
         }
     }
 
-    private WlBinder() { }
-}
+    /** Read a string config ("xr_match" / "desktop_match" — the only string
+     *  keys); returns null when the daemon is unavailable */
+    public static String configGetStr(String key) {
+        IBinder b = get();
+        if (b == null) return null;
+        Parcel d = Parcel.obtain();
+        Parcel r = Parcel.obtain();
+        try {
+            d.writeInterfaceToken(DESCRIPTOR);
+            d.writeString(key);
+            b.transact(T_CFG_GET, d, r, 0);
+            if (r.dataSize() < 4) return null;
+            return r.readString();
+        } catch (Exception e) {
+            Log.e(TAG, "CFG_GET(str) failed", e);
+            s = null;
+            return null;
+        } finally {
+            d.recycle();
+            r.recycle();
+        }
+    }
+
+    /** Write a string config (title match lists); 0 = success */
+    public static int configSetStr(String key, String val) {
+        IBinder b = get();
+        if (b == null) return -1;
+        Parcel d = Parcel.obtain();
+        Parcel r = Parcel.obtain();
+        try {
+            d.writeInterfaceToken(DESCRIPTOR);
+            d.writeString(key);
+            d.writeString(val);
+            b.transact(T_CFG_SET_STR, d, r, 0);
+            return r.dataSize() >= 4 ? r.readInt() : -1;
+        } catch (Exception e) {
+            Log.e(TAG, "CFG_SET(str) failed", e);
+            s = null;
+            return -1;
+        } finally {
+            d.recycle();
+            r.recycle();
+        }
+    }
+
+    private WlBinder() { }}

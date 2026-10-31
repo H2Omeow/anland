@@ -15,12 +15,15 @@ import android.widget.TextView;
  *  window-list long-press menu — all decisions live in the daemon, the APK
  *  has no policy left to configure.) */
 public class WlSettingsActivity extends Activity {
+    private android.widget.LinearLayout root;
+    private android.os.Handler h;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setTitle(R.string.settings_title);
 
-        android.widget.LinearLayout root = new android.widget.LinearLayout(this);
+        root = new android.widget.LinearLayout(this);
         root.setOrientation(android.widget.LinearLayout.VERTICAL);
         root.setPadding(48, 64, 48, 48);
 
@@ -72,6 +75,7 @@ public class WlSettingsActivity extends Activity {
          * dynamically without bombarding per tick (each set = a
          * preferred_scale broadcast + re-configure of every window) */
         android.os.Handler h = new android.os.Handler(getMainLooper());
+        this.h = h;
         final Runnable[] pending = new Runnable[1];
         Runnable apply = () -> WlBinder.configSet("zoom", cur[0]);
         java.util.function.IntConsumer showZoom = pct ->
@@ -311,6 +315,58 @@ public class WlSettingsActivity extends Activity {
         scSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("sc_enabled", on ? 1 : 0));
         root.addView(scSw);
 
+        /* ---- VR (daemon config xr_*: the XR window geometry, the lens model
+         *      and the title that selects it — docs/vr.md) ---- */
+        section(R.string.xr_section);
+        note(R.string.xr_section_tip);
+        switchRow(R.string.xr_enabled, "xr_enabled", false);
+
+        note(R.string.xr_mode_tip);
+        radioRow("xr_mode", new int[]{8, 9, 10},
+                new int[]{R.string.xr_mode_mono, R.string.xr_mode_sbs_h, R.string.xr_mode_sbs_v},
+                new int[]{1, 2, 3}, 2);
+
+        note(R.string.xr_refresh_tip);
+        sliderRow(R.string.xr_refresh, "xr_refresh", 0, 144, 90, 1,
+                v -> v == 0 ? getString(R.string.xr_refresh_panel) : v + " Hz");
+
+        note(R.string.xr_eye_size_tip);
+        eyeSizeRow();
+
+        note(R.string.xr_fov_tip);
+        sliderRow(R.string.xr_fov, "xr_fov", 30, 170, 96, 1, v -> v + "°");
+
+        note(R.string.xr_ipd_tip);
+        sliderRow(R.string.xr_ipd, "xr_ipd", 20, 90, 63, 1, v -> v + " mm");
+
+        note(R.string.xr_scale_tip);
+        sliderRow(R.string.xr_scale, "xr_scale", 200, 2000, 1000, 10, v -> (v / 10) + "%");
+
+        note(R.string.xr_k1_tip);
+        sliderRow(R.string.xr_k1, "xr_k1", -1000, 2000, 0, 10,
+                v -> String.format(java.util.Locale.US, "%.3f", v / 1000.0));
+
+        note(R.string.xr_k2_tip);
+        sliderRow(R.string.xr_k2, "xr_k2", -1000, 2000, 0, 10,
+                v -> String.format(java.util.Locale.US, "%.3f", v / 1000.0));
+
+        note(R.string.xr_ca_tip);
+        sliderRow(R.string.xr_ca, "xr_ca", 0, 100, 0, 1,
+                v -> String.format(java.util.Locale.US, "%.2f", v / 1000.0));
+
+        questPresetRow();
+
+        textRow("xr_match", R.string.xr_match_tip);
+
+        /* ---- Desktop (daemon config desktop_mode / desktop_match: run a
+         *      nested compositor in one window — docs/desktop.md) ---- */
+        section(R.string.desktop_section);
+        note(R.string.desktop_section_tip);
+        note(R.string.desktop_mode_tip);
+        switchRow(R.string.desktop_mode, "desktop_mode", false);
+        textRow("desktop_match", R.string.desktop_match_tip);
+        note(R.string.desktop_hint);
+
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
         scroll.setFillViewport(true);
         scroll.addView(root);
@@ -320,5 +376,199 @@ public class WlSettingsActivity extends Activity {
     private static android.widget.LinearLayout.LayoutParams lp1() {
         return new android.widget.LinearLayout.LayoutParams(
                 0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+    }
+
+    /* ---------------- daemon-config rows ----------------
+     * Every row reads its initial state from the daemon (the single source of
+     * truth, #31) and installs its listener AFTER the initial value, so merely
+     * opening this page never writes anything back. */
+
+    private void section(int titleRes) {
+        android.widget.Space gap = new android.widget.Space(this);
+        gap.setMinimumHeight(96);
+        root.addView(gap);
+        TextView t = new TextView(this);
+        t.setText(titleRes);
+        t.setTextSize(22);
+        t.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(t);
+    }
+
+    private void note(int tipRes) {
+        android.widget.Space gap = new android.widget.Space(this);
+        gap.setMinimumHeight(40);
+        root.addView(gap);
+        TextView t = new TextView(this);
+        t.setText(tipRes);
+        root.addView(t);
+    }
+
+    private android.widget.Switch switchRow(int labelRes, String key, boolean defOn) {
+        android.widget.Switch sw = new android.widget.Switch(this);
+        sw.setText(labelRes);
+        int got = WlBinder.configGet(key);
+        sw.setChecked(got < 0 ? defOn : got != 0);   /* daemon down → default */
+        sw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet(key, on ? 1 : 0));
+        root.addView(sw);
+        return sw;
+    }
+
+    private void radioRow(String key, int[] ids, int[] labelRes, int[] values, int defVal) {
+        RadioGroup rg = new RadioGroup(this);
+        RadioButton[] rbs = new RadioButton[ids.length];
+        for (int i = 0; i < ids.length; i++) {
+            rbs[i] = new RadioButton(this);
+            rbs[i].setId(ids[i]);   /* unique across the whole activity */
+            rbs[i].setText(labelRes[i]);
+            rg.addView(rbs[i]);
+        }
+        int got = WlBinder.configGet(key);
+        int cur = got < 0 ? defVal : got;
+        for (int i = 0; i < values.length; i++)
+            if (values[i] == cur) rbs[i].setChecked(true);
+        rg.setOnCheckedChangeListener((g, checkedId) -> {
+            for (int i = 0; i < ids.length; i++)
+                if (ids[i] == checkedId) WlBinder.configSet(key, values[i]);
+        });
+        root.addView(rg);
+    }
+
+    /** daemon-backed slider with a step; 200ms drag debounce, immediate write
+     *  on release (each write re-configures live windows / republishes) */
+    private void sliderRow(int labelRes, String key, int lo, int hi, int defVal, int step,
+                           java.util.function.IntFunction<String> fmt) {
+        TextView tip = new TextView(this);
+        tip.setText(labelRes);
+        root.addView(tip);
+
+        final TextView val = new TextView(this);
+        val.setTextSize(20);
+        root.addView(val);
+
+        final android.widget.SeekBar sb = new android.widget.SeekBar(this);
+        final int[] cur = {defVal};
+        int got = WlBinder.configGet(key);
+        if (got >= lo && got <= hi) cur[0] = lo + ((got - lo) / step) * step;
+        sb.setMax((hi - lo) / step);
+        sb.setProgress((cur[0] - lo) / step);
+        root.addView(sb);
+        val.setText(fmt.apply(cur[0]));
+
+        final Runnable[] pend = new Runnable[1];
+        sb.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(android.widget.SeekBar s, int prog, boolean fromUser) {
+                if (!fromUser) return;
+                cur[0] = lo + prog * step;
+                val.setText(fmt.apply(cur[0]));
+                if (pend[0] != null) h.removeCallbacks(pend[0]);
+                int v = cur[0];
+                pend[0] = () -> WlBinder.configSet(key, v);
+                h.postDelayed(pend[0], 200);
+            }
+            @Override public void onStartTrackingTouch(android.widget.SeekBar s) { }
+            @Override public void onStopTrackingTouch(android.widget.SeekBar s) {
+                if (pend[0] != null) h.removeCallbacks(pend[0]);
+                pend[0] = null;
+                int v = cur[0];
+                h.post(() -> WlBinder.configSet(key, v));
+            }
+        });
+    }
+
+    /** per-eye render target: two pickers (0 = derive from the eye layout and
+     *  the panel), debounced like the initial-size row */
+    private void eyeSizeRow() {
+        final android.widget.NumberPicker wp = new android.widget.NumberPicker(this);
+        final android.widget.NumberPicker hp = new android.widget.NumberPicker(this);
+        android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        TextView wl = new TextView(this);
+        wl.setText(R.string.xr_eye_w);
+        TextView hl = new TextView(this);
+        hl.setText(R.string.xr_eye_h);
+        row.addView(wl);
+        row.addView(wp, lp1());
+        row.addView(hl);
+        row.addView(hp, lp1());
+        root.addView(row);
+
+        int gw = WlBinder.configGet("xr_eye_w");
+        int gh = WlBinder.configGet("xr_eye_h");
+        final int[] sz = {(gw >= 0 && gw <= 4096) ? gw : 0,
+                          (gh >= 0 && gh <= 4096) ? gh : 0};
+
+        final Runnable[] pend = new Runnable[1];
+        android.widget.NumberPicker.OnValueChangeListener ncl = (p, o, n) -> {
+            if (p == wp) sz[0] = n; else sz[1] = n;
+            if (pend[0] != null) h.removeCallbacks(pend[0]);
+            int w = sz[0], ht = sz[1];
+            pend[0] = () -> {
+                WlBinder.configSet("xr_eye_w", w);
+                WlBinder.configSet("xr_eye_h", ht);
+            };
+            h.postDelayed(pend[0], 300);
+        };
+        wp.setMinValue(0);
+        wp.setMaxValue(4096);
+        wp.setWrapSelectorWheel(false);
+        wp.setValue(sz[0]);
+        wp.setOnValueChangedListener(ncl);
+        hp.setMinValue(0);
+        hp.setMaxValue(4096);
+        hp.setWrapSelectorWheel(false);
+        hp.setValue(sz[1]);
+        hp.setOnValueChangedListener(ncl);
+    }
+
+    /** string config (a title match list): TEXT + Apply, because the daemon
+     *  writes config.json unescaped and rejects quotes / backslashes */
+    private void textRow(String key, int tipRes) {
+        TextView tip = new TextView(this);
+        tip.setText(tipRes);
+        root.addView(tip);
+
+        final android.widget.EditText ed = new android.widget.EditText(this);
+        ed.setSingleLine(true);
+        String cur = WlBinder.configGetStr(key);
+        if (cur != null) ed.setText(cur);
+        root.addView(ed);
+
+        final TextView status = new TextView(this);
+        status.setTextSize(14);
+        root.addView(status);
+
+        android.widget.Button apply = new android.widget.Button(this);
+        apply.setText(R.string.cfg_str_apply);
+        apply.setOnClickListener(v -> {
+            if (!WlBinder.available()) {
+                status.setText(R.string.cfg_str_nodaemon);
+                return;
+            }
+            int rc = WlBinder.configSetStr(key, ed.getText().toString().trim());
+            status.setText(rc == 0 ? "" : getString(R.string.cfg_str_rejected));
+        });
+        root.addView(apply);
+    }
+
+    /** one button that fills in the numbers for a Quest 3S (1832x1920/eye,
+     *  90 Hz, ~96° per eye, 63 mm IPD) — the distortion terms stay a starting
+     *  point that has to be tuned through the lenses */
+    private void questPresetRow() {
+        android.widget.Button b = new android.widget.Button(this);
+        b.setText(R.string.xr_preset_quest);
+        b.setOnClickListener(v -> {
+            WlBinder.configSet("xr_mode", 2);
+            WlBinder.configSet("xr_refresh", 90);
+            WlBinder.configSet("xr_eye_w", 1832);
+            WlBinder.configSet("xr_eye_h", 1920);
+            WlBinder.configSet("xr_fov", 96);
+            WlBinder.configSet("xr_ipd", 63);
+            WlBinder.configSet("xr_scale", 900);
+            WlBinder.configSet("xr_k1", 220);
+            WlBinder.configSet("xr_k2", 40);
+            WlBinder.configSet("xr_ca", 10);
+            recreate();   /* rebuild the page from the daemon's new values */
+        });
+        root.addView(b);
     }
 }

@@ -46,9 +46,17 @@ static void output_send_state(struct wl_resource* res) {
                         g_srv.info.refresh_hz * 1000);
     if (wl_resource_get_version(res) >= WL_OUTPUT_SCALE_SINCE_VERSION)
         wl_output_send_scale(res, (uint32_t)g_srv.info.scale);
+    /* v4: name/description. A compositor host matches its output configuration
+     * by name (Qt does), so give the one virtual output a stable name instead
+     * of letting every session invent its own. */
+    if (wl_resource_get_version(res) >= WL_OUTPUT_NAME_SINCE_VERSION)
+        wl_output_send_name(res, "anland-0");
+    if (wl_resource_get_version(res) >= WL_OUTPUT_DESCRIPTION_SINCE_VERSION)
+        wl_output_send_description(res, "anland virtual output");
     if (wl_resource_get_version(res) >= WL_OUTPUT_DONE_SINCE_VERSION)
         wl_output_send_done(res);
 }
+
 
 static void output_res_destroy(struct wl_resource* res) {
     struct awl_output_res* o = wl_resource_get_user_data(res);
@@ -66,10 +74,16 @@ static const struct wl_output_interface output_iface = {
     .release = output_release,   /* v3 */
 };
 
+/* Used by awl_xdgout.c: only objects this daemon created may be turned into a
+ * zxdg_output_v1 (the protocol requires rejecting anything else). */
+int awl_output_res_owns(struct wl_resource* res) {
+    return res && wl_resource_instance_of(res, &wl_output_interface, &output_iface);
+}
+
 static void output_bind(struct wl_client* client, void* data,
                         uint32_t version, uint32_t id) {
     struct wl_resource* res = wl_resource_create(
-            client, &wl_output_interface, version < 3 ? version : 3, id);
+            client, &wl_output_interface, version < 4 ? version : 4, id);
     if (!res) { wl_client_post_no_memory(client); return; }
     struct awl_output_res* o = calloc(1, sizeof(*o));
     if (!o) { wl_resource_destroy(res); wl_client_post_no_memory(client); return; }
@@ -99,7 +113,12 @@ void awl_output_grow(uint32_t w, uint32_t h) {
         output_send_state(o->res);
         wl_client_flush(wl_resource_get_client(o->res));
     }
+    /* xdg-output mirrors the wl_output mode, so its objects need the same
+     * re-announce (once for all of them: g_outputs has one entry per bound
+     * wl_output, and every zxdg_output_v1 refers to the same virtual screen). */
+    awl_xdgout_output_changed();
     pthread_rwlock_unlock(&g_srv.rwl);
+    awl_present_set_refresh(g_srv.info.refresh_hz);
     LOGI("output grown to %ux%u (window %ux%u attached)",
          g_srv.info.width, g_srv.info.height, w, h);
 }
@@ -397,8 +416,10 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     awl_idle_setup();         /* zwp_idle_inhibit_manager_v1 (keep-screen-on, C_KEEPON) */
     awl_icon_setup();         /* xdg_toplevel_icon_manager_v1 (per-window icons, C_ICON) */
     awl_esync_setup();        /* zwp_linux_explicit_synchronization_v1 (acquire/release fences) */
+    awl_present_setup();      /* wp_presentation (presented timestamps for nested compositors) */
+    awl_xdgout_setup();       /* zxdg_output_manager_v1 (logical output geometry for Qt/KWin) */
 
-    if (!wl_global_create(g_srv.display, &wl_output_interface, 3,
+    if (!wl_global_create(g_srv.display, &wl_output_interface, 4,
                           NULL, output_bind))
         LOGE("wl_output global create failed");
 

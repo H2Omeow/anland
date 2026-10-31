@@ -147,6 +147,42 @@ owns a windowed HMD:
 Head tracking is 3DoF (orientation only), the two controllers are a gamepad
 mapped onto the standard OpenVR profile, and the distortion happens on the host —
 see [docs/vr.md](docs/vr.md) for the geometry, the config keys and the limits.
+Every knob (eye layout, refresh, per-eye size, FOV, IPD, render scale,
+distortion, chromatic aberration, the title that selects the window) lives in
+**Window Settings → VR**, with a Quest 3S preset; changes reach a running session
+without restarting anything.
+
+## Desktop: a nested compositor in a window
+
+A desktop compositor (KWin, Weston, Sway, Mutter) is just another Wayland
+client, so it can run nested inside an anland window: it asks the host for one
+surface and draws a whole desktop into it. The 5.x line solved this differently,
+with a `backend-anland` plugin re-implemented for each KWin release; 6.x instead
+makes the host a compositor its clients can trust:
+
+- `wl_output` v4 (+ `zxdg_output_manager_v1`) with the real panel size, name and
+  refresh,
+- `wp_presentation` so a client compositor learns *when* the frame it submitted
+  reached the screen instead of assuming it, which is what KDE's mailbox
+  submission model needs to stop queueing stale frames,
+- `zwp_linux_dmabuf_v1` v3 with the format/modifier list the host can import
+  (`LINEAR`), and the shm path for when it cannot,
+- a "desktop session" mark (`desktop_mode` + `desktop_match` in the daemon
+  config): the matched toplevel gets `FULLSCREEN|MAXIMIZED` in every configure
+  and is pinned to the panel, so the compositor treats the host as a monitor
+  rather than a floating window manager.
+
+```sh
+sc_enabled=0, desktop_mode=1        # /data/adb/modules/anland-awl/config.json
+bash anlandx/anland-session.sh &
+bash anlandx/anland-desktop         # auto-detects kwin_wayland > weston > sway > mutter
+```
+
+[docs/desktop.md](docs/desktop.md) covers the advertised protocols, the
+launcher, verification (`wayland-info`, `logcat -s waylandbridge`) and the
+limits — no DRM/KMS, one desktop at a time, and a note that a full Plasma
+session has not been device-tested yet. Both keys are in
+**Window Settings → Desktop** as well.
 
 ## Related projects
 

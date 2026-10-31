@@ -537,6 +537,12 @@ static void surface_destroy_impl(struct wl_resource* res) {
         g_srv.cbs.window_destroyed(g_srv.cbs.user, s->id);
     }
 
+    /* No frame of this surface will reach the screen any more: answer the
+     * waiting wp_presentation feedback with 'discarded' now, so a nested
+     * compositor tears its render loop down instead of waiting for a frame
+     * that never comes (no daemon lock is held here). */
+    awl_present_surface_gone(s->id);
+
     /* Frame stream: hand every queued frame back (release events go out
      * here, on the dispatch thread). Waits for a render thread that still
      * has this layer's queue locked (a child layer of a live window) — that
@@ -1227,6 +1233,10 @@ void awl_surface_presented(uint64_t id) {
         return;
     }
     pthread_mutex_lock(&s->ev_lock);
+    /* presentation-time: this frame is now the one on screen for this
+     * window, so the feedback objects queued for it can be answered with
+     * this timestamp (leaf lock inside ev_lock, see awl_present.c). */
+    awl_present_frame(id);
     struct awl_frame_cb* cb;
     struct awl_frame_cb* tmp;
     wl_list_for_each_safe(cb, tmp, &s->frame_callbacks, link) {

@@ -16,16 +16,70 @@
 
 #define AWL_XDG_VERSION 3
 
+/* ---------------- desktop / session windows ----------------
+ * A nested compositor (KWin, weston, sway, mutter) is a single window that
+ * owns the whole screen. Android still sizes that window, but the client has
+ * to be told the output is its own: without FULLSCREEN|MAXIMIZED in the
+ * configure a nested compositor keeps a floating toplevel, keeps
+ * re-negotiating sizes with the host, and its own output geometry never
+ * matches the surface it draws into. The mark lives in a small table keyed by
+ * window id (ids are never reused, g_srv.next_surface_id only grows) so
+ * struct awl_surface does not need another flag. */
+#define AWL_XDG_SESSION_MAX 8
+static uint64_t g_session_ids[AWL_XDG_SESSION_MAX];
+static pthread_mutex_t g_session_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void awl_window_set_session(uint64_t id, int on) {
+    pthread_mutex_lock(&g_session_lock);
+    int found = -1;
+    int free_slot = -1;
+    for (int i = 0; i < AWL_XDG_SESSION_MAX; i++) {
+        if (g_session_ids[i] == id) { found = i; break; }
+        if (!g_session_ids[i] && free_slot < 0) free_slot = i;
+    }
+    if (on) {
+        int slot = found >= 0 ? found : free_slot;
+        if (slot >= 0) g_session_ids[slot] = id;
+    } else if (found >= 0) {
+        g_session_ids[found] = 0;
+    }
+    pthread_mutex_unlock(&g_session_lock);
+    LOGI("window %llu: desktop session %s", (unsigned long long)id,
+         on ? "on" : "off");
+}
+
+int awl_window_is_session(uint64_t id) {
+    int on = 0;
+    pthread_mutex_lock(&g_session_lock);
+    for (int i = 0; i < AWL_XDG_SESSION_MAX; i++) {
+        if (g_session_ids[i] == id) { on = 1; break; }
+    }
+    pthread_mutex_unlock(&g_session_lock);
+    return on;
+}
+
+/* Append a toplevel state unless it is already there (xdg-shell forbids
+ * duplicates in the array). */
+static void add_state(struct wl_array* arr, uint32_t st) {
+    uint32_t* it;
+    wl_array_for_each(it, arr) {
+        if (*it == st) return;
+    }
+    uint32_t* p = wl_array_add(arr, sizeof(uint32_t));
+    if (p) *p = st;
+}
+
 /* caller holds s->ev_lock */
 static void send_configure_locked(struct awl_surface* s,
                                   int32_t w, int32_t h,
                                   const uint32_t* states, size_t nstates) {
     struct wl_array arr;
     wl_array_init(&arr);
-    if (nstates) {
-        uint32_t* p = wl_array_add(&arr, nstates * sizeof(uint32_t));
-        if (p) memcpy(p, states, nstates * sizeof(uint32_t));
+    if (awl_window_is_session(s->id)) {
+        add_state(&arr, XDG_TOPLEVEL_STATE_FULLSCREEN);
+        add_state(&arr, XDG_TOPLEVEL_STATE_MAXIMIZED);
     }
+    for (size_t i = 0; i < nstates; i++) add_state(&arr, states[i]);
     uint32_t serial = wl_display_get_serial(g_srv.display);
     s->u.xdg.conf_w = w;
     s->u.xdg.conf_h = h;

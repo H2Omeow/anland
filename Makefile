@@ -273,6 +273,7 @@ anlandx:
 	mkdir -p "$(OUT)/anlandx/bubblewrap" "$(OUT)/anlandx/xserver"
 	cp anland-session/miniwm.c anland-session/anland-session.sh \
 	   anland-session/anland-session.service anland-session/deps_noble.sh \
+	   anland-session/anland-desktop \
 	   LICENSE "$(OUT)/anlandx/"
 	cp anland-session/setup.sh "$(OUT)/anlandx/setupanlandx.sh"
 	cp -r patches "$(OUT)/anlandx/patches"
@@ -313,7 +314,7 @@ anlandx:
 	{ git -C third_party/xserver rev-parse HEAD; cat patches/xwayland/*.patch | md5sum; } \
 	  > "$(OUT)/anlandx/xserver/ANLAND-SOURCE"
 	chmod 755 "$(OUT)/anlandx/setupanlandx.sh" "$(OUT)/anlandx/anland-session.sh" \
-	   "$(OUT)/anlandx/deps_noble.sh"
+	   "$(OUT)/anlandx/anland-desktop" "$(OUT)/anlandx/deps_noble.sh"
 	tar -C "$(OUT)" --owner=0 --group=0 -czf "$(OUT)/anlandx.tar.gz" anlandx
 	ls -la "$(OUT)/anlandx.tar.gz"
 	echo "OK: $(OUT)/anlandx.tar.gz  (device: tar xzf anlandx.tar.gz && bash anlandx/setupanlandx.sh)"

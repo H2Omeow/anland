@@ -34,4 +34,44 @@
     <string name="init_size_h">Height</string>
     <string name="sc_backend_tip">Compositor backend (on = SC/HWC: wayland layers are composed by SurfaceFlinger, zero-copy scanout when possible; off = per-window GL renderer fallback. Applies to windows attached from now on):</string>
     <string name="sc_backend">SC compositor backend (HWC)</string>
+
+    <!-- WlSettingsActivity: VR -->
+    <string name="xr_section">VR (SteamVR in an XR window)</string>
+    <string name="xr_section_tip">The daemon turns the window whose title matches into a headset view: barrel pre-distortion per eye plus reprojection with the phone IMU. Needs the SC backend OFF (the GL path does the warping).</string>
+    <string name="xr_enabled">Enable the XR window (xr_enabled)</string>
+    <string name="xr_mode_tip">Eye layout (how the headset image is packed into the window):</string>
+    <string name="xr_mode_mono">Single eye (one image fills the screen)</string>
+    <string name="xr_mode_sbs_h">Side by side, horizontal</string>
+    <string name="xr_mode_sbs_v">Side by side, vertical (over/under)</string>
+    <string name="xr_refresh">Frame rate</string>
+    <string name="xr_refresh_tip">Frame rate published to the headset (0 = follow the panel):</string>
+    <string name="xr_refresh_panel">panel default</string>
+    <string name="xr_eye_size_tip">Render target per eye (0 = derive from the eye layout and the panel):</string>
+    <string name="xr_eye_w">Width</string>
+    <string name="xr_eye_h">Height</string>
+    <string name="xr_fov">Field of view</string>
+    <string name="xr_fov_tip">Field of view, total per eye (degrees):</string>
+    <string name="xr_ipd">Interpupillary distance</string>
+    <string name="xr_ipd_tip">Interpupillary distance:</string>
+    <string name="xr_scale">Render scale</string>
+    <string name="xr_scale_tip">Render scale — eye resolution as a share of the panel (lower = faster, blurrier):</string>
+    <string name="xr_k1">Distortion k1</string>
+    <string name="xr_k1_tip">Lens barrel distortion k1 (0 = none; raise until straight lines look straight through the lenses):</string>
+    <string name="xr_k2">Distortion k2</string>
+    <string name="xr_k2_tip">Lens barrel distortion k2 (second order, only needs a touch):</string>
+    <string name="xr_ca">Chromatic aberration</string>
+    <string name="xr_ca_tip">Chromatic aberration correction (0 = off; raise if edges fringe red/blue):</string>
+    <string name="xr_match_tip">Window titles treated as the XR window (comma separated, case-insensitive):</string>
+    <string name="xr_preset_quest">Quest 3S preset</string>
+    <string name="cfg_str_apply">Apply</string>
+    <string name="cfg_str_rejected">Rejected by the daemon (no quotes, no backslashes)</string>
+    <string name="cfg_str_nodaemon">daemon unreachable</string>
+
+    <!-- WlSettingsActivity: desktop -->
+    <string name="desktop_section">Desktop (nested compositor)</string>
+    <string name="desktop_section_tip">A compositor such as KWin, Weston, Sway or Mutter running inside one anland window. Session mode gives it FULLSCREEN|MAXIMIZED on every configure and pins it to the panel, so it treats the host as a monitor.</string>
+    <string name="desktop_mode_tip">Session window:</string>
+    <string name="desktop_mode">Treat the matched window as a desktop session (desktop_mode)</string>
+    <string name="desktop_match_tip">Window titles treated as the desktop session (comma separated, case-insensitive):</string>
+    <string name="desktop_hint">Launch it from the container: anland-session.sh, then anland-desktop.</string>
 </resources>

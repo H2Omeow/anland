@@ -725,6 +725,30 @@ double awl_zoom_scale(void);
 void awl_surface_layer_uv(struct awl_surface* s, float* u0, float* v0,
                           float* su, float* sv);
 
+/* awl_present.c — wp_presentation (presentation-time).
+ * A nested compositor (KWin/weston/sway) paces its render loop from frame
+ * callbacks plus, when advertised, the presented-time feedback: without it a
+ * compositor can only guess when its frame reached the screen, which shows up
+ * as over-submission (KDE mailbox) and drifting frame pacing. Timestamps are
+ * CLOCK_MONOTONIC and describe the moment the renderer's eglSwapBuffers
+ * returned; seq counts presented frames of the (single) virtual output. */
+void awl_present_setup(void);        /* creates the wp_presentation global (server_start) */
+void awl_present_set_refresh(double hz);   /* output refresh changed (wall clock, any thread) */
+void awl_present_frame(uint64_t surface_id);       /* render thread: this window's frame is on screen */
+void awl_present_surface_gone(uint64_t surface_id);/* window gone: answer pending feedback 'discarded' */
+
+/* awl_xdgout.c — zxdg_output_manager_v1 (xdg-output).
+ * Compositor hosts (Qt/KWin in particular) derive their output name and
+ * logical geometry from it; the host's logical space == physical space here
+ * (zoom is per-window in the renderer), so logical_size mirrors the wl_output
+ * mode and the name is a constant. */
+void awl_xdgout_setup(void);         /* creates the zxdg_output_manager_v1 global */
+void awl_xdgout_output_changed(void);/* caller holds rwl: re-send state to every object */
+
+/* awl_server.c — the wl_output this daemon created (defined there, used by
+ * awl_xdgout.c to reject foreign output objects in get_xdg_output). */
+int awl_output_res_owns(struct wl_resource* res);
+
 /* awl_server.c — dedicated per-client event thread
  * Called at map (first buffer commit, on the dispatch thread that owns the
  * client at that moment): the first call migrates that client's fd source

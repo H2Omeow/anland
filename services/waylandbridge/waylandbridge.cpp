@@ -121,6 +121,7 @@ static bool binder_plat_init(void) {
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ctype.h>      /* tolower — desktop_match (case-insensitive title match) */
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -203,6 +204,12 @@ enum {
                             * and uses it for reprojection (awl_xr.cpp). */
     AWL_T_XR_INPUT = 20,  /* (id:i64 n:i32 then n*9:i32) — controller snapshot
                             * (ONEWAY), same layout awl_xr_set_input parses. */
+    AWL_T_CFG_SET_STR = 21, /* (key:string16 val:string16) → ok:i32; the string
+                             * half of the config (only the two title match
+                             * lists — "xr_match", "desktop_match"). The JSON
+                             * file is written unescaped, so a value containing
+                             * a quote, a backslash or a control character is
+                             * rejected instead of corrupting the config. */
 };
 
 /* ---- window lifecycle events (daemon → subscriber apps, delivered over
@@ -295,6 +302,11 @@ static std::map<uint64_t, awl_win_state> g_wins;
 
 /* XR control push (defined after ctrl_of, which it needs) */
 static void xr_ctrl_send(uint64_t id);
+
+/* desktop/session mode (docs/desktop.md): pin a matched nested compositor to
+ * the panel and tell it it is fullscreen; defined after ctrl_of */
+static void desktop_sync_window(uint64_t id, const char* title);
+static void desktop_sync_windows(void);
 
 /* death token → associated windows (APP process → multiple windows) */
 struct death_link {
@@ -914,6 +926,11 @@ static void cb_window_title(void* user, uint64_t id, const char* title) {
         awl_xr_mark_window(id, awl_xr_title_matches(title));
         xr_changed = awl_xr_window_active(id) != was;
     }
+    /* Desktop/session: the nested compositor's toplevel owns the screen. The
+     * decision rides on the same title event as XR (both are "what kind of
+     * window is this"), and the two are mutually exclusive in practice — a
+     * compositor window is not an XR eye target. */
+    desktop_sync_window(id, title);
     /* clients that retitle dynamically (terminals/browsers) → Recents label follows */
     if (ctrl) {
         ctrl_send(ctrl, AWL_C_TITLE, title);
@@ -1297,6 +1314,104 @@ static bool g_xr_started = false;
 static uint32_t g_panel_w = 0, g_panel_h = 0;
 static double g_panel_hz = 72.0;
 
+/* Desktop/session mode (docs/desktop.md): the window whose title matches
+ * desktop_match is a nested compositor that owns the whole screen. It gets
+ * FULLSCREEN|MAXIMIZED in every configure (awl_xdg.c session table) and is
+ * pinned to the panel size, so it stops re-negotiating geometry with the
+ * host and its own output geometry matches the surface it draws into. */
+static int g_desktop_mode = 0;
+static char g_desktop_match[256] = "kwin,plasma,weston,sway,mutter,gnome-shell,wayfire";
+
+/* ---------------- desktop / session mode (docs/desktop.md) ---------------- */
+
+/* Comma-separated, case-insensitive substring match — the same rule awl_xr.c
+ * uses for xr_match, kept in sync deliberately so both keys feel alike:
+ * "plasma" matches "Plasma Desktop" and "org.kde.plasma", and an empty list
+ * matches nothing. */
+static bool match_list(const char* list, const char* title) {
+    if (!list || !list[0] || !title || !title[0]) return false;
+    const char* p = list;
+    while (*p) {
+        while (*p == ',' || *p == ' ' || *p == '\t') p++;
+        const char* e = p;
+        while (*e && *e != ',') e++;
+        size_t n = (size_t)(e - p);
+        while (n && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+        if (n) {
+            size_t tl = strlen(title);
+            for (size_t i = 0; i + n <= tl; i++) {
+                size_t k = 0;
+                while (k < n &&
+                       tolower((unsigned char)title[i + k]) ==
+                       tolower((unsigned char)p[k])) k++;
+                if (k == n) return true;
+            }
+        }
+        p = e;
+    }
+    return false;
+}
+
+static bool desktop_title_matches(const char* title) {
+    if (!g_desktop_mode) return false;
+    return match_list(g_desktop_match, title);
+}
+
+/* Mark/unmark one window as the desktop session and, when it becomes one, pin
+ * it to the panel: the nested compositor then draws a desktop that is exactly
+ * as large as the screen it is shown on, instead of talking the host into
+ * resizing it every time the user touches the window.
+ *
+ * Runs on the Wayland dispatch thread (title path) or a binder thread
+ * (cfg_set); awl_window_resize / awl_output_grow take g_srv.rwl themselves,
+ * and the ctrl transact must not run under g_state_lock — hence the snapshot
+ * via ctrl_of(). */
+static void desktop_sync_window(uint64_t id, const char* title) {
+    const bool want = desktop_title_matches(title);
+    const bool was = awl_window_is_session(id) != 0;
+    if (want == was) return;
+
+    awl_window_set_session(id, want);
+    if (!want) {
+        LOGI("window %llu: left desktop session mode", (unsigned long long)id);
+        backend_request_render(id);
+        return;
+    }
+
+    /* Fullscreen Activity: the attached surface is already the panel, so this
+     * is usually a no-op — but a compositor can be launched into an
+     * unattached (windowed) surface first, and then the pin is what makes its
+     * output geometry right on the first frame. */
+    if (g_panel_w && g_panel_h) {
+        awl_output_grow(g_panel_w, g_panel_h);
+        awl_window_resize(id, g_panel_w, g_panel_h);
+    }
+    backend_request_render(id);
+
+    /* Keep the screen awake while a desktop session runs — a locked screen
+     * kills the compositor's frame loop and every guest app with it. */
+    AIBinder* ctrl = ctrl_of(id);
+    if (ctrl) {
+        int32_t on[1] = { 1 };
+        ctrl_send_ints(ctrl, AWL_C_KEEPON, on, 1);
+        AIBinder_decStrong(ctrl);
+    }
+    LOGI("window %llu: desktop session on (%s), pinned to %ux%u",
+         (unsigned long long)id, title ? title : "", g_panel_w, g_panel_h);
+}
+
+/* Re-evaluate every live window (cfg_set desktop_mode, or a hand-edited
+ * desktop_match picked up on the next config write). */
+static void desktop_sync_windows(void) {
+    std::vector<std::pair<uint64_t, std::string>> snap;
+    {
+        std::lock_guard<std::mutex> lk(g_state_lock);
+        for (auto& [id, ws] : g_wins)
+            if (ws.title && ws.title[0]) snap.emplace_back(id, ws.title);
+    }
+    for (auto& [id, title] : snap) desktop_sync_window(id, title.c_str());
+}
+
 /* known config keys → valid domain (under g_cfg_lock); unknown keys rejected */
 static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "zoom") { *lo = 50; *hi = 300; return true; }
@@ -1316,6 +1431,8 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "xr_scale") { *lo = 200; *hi = 2000; return true; }
     if (key == "xr_k1" || key == "xr_k2") { *lo = -1000; *hi = 2000; return true; }
     if (key == "xr_ca") { *lo = 0; *hi = 100; return true; }
+    /* desktop block (docs/desktop.md) */
+    if (key == "desktop_mode") { *lo = 0; *hi = 1; return true; }
     return false;
 }
 
@@ -1359,6 +1476,8 @@ static void cfg_save_locked(void) {
     int sl = g_sock_listen ? 1 : 0;
     char match[256];
     memcpy(match, g_xr_match, sizeof(match));
+    char dmatch[256];
+    memcpy(dmatch, g_desktop_match, sizeof(dmatch));
     {
         FILE* f = fopen(AWL_CFG_PATH, "r");
         if (f) {
@@ -1375,6 +1494,8 @@ static void cfg_save_locked(void) {
             if (v == 0 || v == 1) sl = v;
             if (cfg_parse_str(buf, "xr_match", got, sizeof(got)) == 0)
                 memcpy(match, got, sizeof(match));
+            if (cfg_parse_str(buf, "desktop_match", got, sizeof(got)) == 0)
+                memcpy(dmatch, got, sizeof(dmatch));
         }
     }
     char tmp[128];
@@ -1389,12 +1510,14 @@ static void cfg_save_locked(void) {
                "  \"xr_fov\": %d,\n  \"xr_ipd\": %d,\n  \"xr_scale\": %d,\n"
                "  \"xr_k1\": %d,\n  \"xr_k2\": %d,\n  \"xr_ca\": %d,\n"
                "  \"xr_match\": \"%s\",\n"
+               "  \"desktop_mode\": %d,\n  \"desktop_match\": \"%s\",\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
             g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode,
             g_cfg_xwayland_scale.load(std::memory_order_relaxed) ? 1 : 0,
             g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
             g_xr_enabled, g_xr_mode, g_xr_refresh, g_xr_eye_w, g_xr_eye_h,
             g_xr_fov, g_xr_ipd, g_xr_scale, g_xr_k1, g_xr_k2, g_xr_ca, match,
+            g_desktop_mode, dmatch,
             rt, sl);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
@@ -1561,6 +1684,20 @@ static void cfg_load_and_apply(void) {
     if (g_xr_enabled)
         LOGI("config: XR on (mode=%d fov=%ddeg ipd=%dmm scale=%d/1000 k1=%d/1000 k2=%d/1000)",
              g_xr_mode, g_xr_fov, g_xr_ipd, g_xr_scale, g_xr_k1, g_xr_k2);
+    /* desktop block (docs/desktop.md): no windows exist yet at startup, so
+     * only the mirrors are set here — the title callback marks the session
+     * window when its compositor announces itself, and desktop_sync_window()
+     * pins it to the panel size at that point. */
+    int dm = cfg_parse_int(buf, "desktop_mode");
+    if (dm == 0 || dm == 1) {
+        g_desktop_mode = dm;
+        LOGI("config: desktop_mode=%d (%s)", dm,
+             dm ? "matched toplevel = whole-screen session" : "off");
+    } else if (dm != -1) {
+        LOGE("config: desktop_mode=%d out of range (0..1), ignored", dm);
+    }
+    if (cfg_parse_str(buf, "desktop_match", g_desktop_match, sizeof(g_desktop_match)) == 0)
+        LOGI("config: desktop_match=\"%s\"", g_desktop_match);
 }
 
 /* set: apply → persist (apply first, write second; a write failure only warns — the live value stays in effect) */
@@ -1628,6 +1765,17 @@ static int cfg_set(const std::string& key, int32_t val) {
             cfg_save_locked();
         }
         LOGI("config set sc_enabled=%d (new attaches + persisted)", val);
+    } else if (key == "desktop_mode") {
+        /* the whole point of the key: flip a live compositor window into
+         * (or out of) session mode without restarting it — the configure it
+         * gets next carries (or loses) FULLSCREEN|MAXIMIZED */
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            g_desktop_mode = val;
+            cfg_save_locked();
+        }
+        desktop_sync_windows();
+        LOGI("config set desktop_mode=%d (applied + persisted)", val);
     } else if (key.rfind("xr_", 0) == 0) {
         /* XR geometry/config: mirrors → module (republishes anland-xr-display)
          * → persist, then re-push C_XR to the live XR windows. The ctrl
@@ -1651,6 +1799,46 @@ static int cfg_set(const std::string& key, int32_t val) {
         }
         xr_notify_windows();
     }
+    return 0;
+}
+
+/* string config: only the two title match lists — every other key is numeric.
+ * cfg_save_locked() prints the file with fprintf("%s") (no JSON escaping), so a
+ * value carrying a quote, a backslash or a control byte would produce a config
+ * the daemon itself can no longer parse: reject those instead of writing them. */
+static int cfg_set_str(const std::string& key, const std::string& val) {
+    const bool is_xr = key == "xr_match";
+    if (!is_xr && key != "desktop_match") {
+        LOGE("config set: unknown string key '%s'", key.c_str());
+        return -1;
+    }
+    if (val.size() >= 200) {
+        LOGE("config set: %s too long (%zu bytes, max 199)", key.c_str(), val.size());
+        return -2;
+    }
+    for (unsigned char c : val) {
+        if (c < 0x20 || c == 0x7f || c == '"' || c == '\\') {
+            LOGE("config set: %s rejected (byte 0x%02x not allowed)", key.c_str(), c);
+            return -3;
+        }
+    }
+    if (is_xr) {
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            snprintf(g_xr_match, sizeof(g_xr_match), "%s", val.c_str());
+            xr_configure_locked();
+            cfg_save_locked();
+        }
+        xr_notify_windows();   /* live XR windows hear about it through C_XR */
+    } else {
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            snprintf(g_desktop_match, sizeof(g_desktop_match), "%s", val.c_str());
+            cfg_save_locked();
+        }
+        desktop_sync_windows();
+    }
+    LOGI("config set %s=\"%s\" (applied + persisted)", key.c_str(), val.c_str());
     return 0;
 }
 
@@ -2257,6 +2445,22 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         else if (key == "xr_k1") v = g_xr_k1;
         else if (key == "xr_k2") v = g_xr_k2;
         else if (key == "xr_ca") v = g_xr_ca;
+        else if (key == "desktop_mode") {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            v = g_desktop_mode;
+        }
+        else if (key == "xr_match" || key == "desktop_match") {
+            /* the string half of the config — answered as a string16, read by
+             * WlBinder.configGetStr (a numeric read of these keys stays -1) */
+            char tmp[256];
+            {
+                std::lock_guard<std::mutex> lk(g_cfg_lock);
+                snprintf(tmp, sizeof(tmp), "%s",
+                         key == "xr_match" ? g_xr_match : g_desktop_match);
+            }
+            AParcel_writeString(out, tmp, (int32_t)strlen(tmp));
+            return STATUS_OK;
+        }
         else LOGE("config get: unknown key '%s'", key.c_str());
         AParcel_writeInt32(out, v);
         return STATUS_OK;
@@ -2268,6 +2472,14 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             AParcel_readInt32(in, &val) != STATUS_OK)
             return STATUS_BAD_VALUE;
         AParcel_writeInt32(out, cfg_set(key, val));
+        return STATUS_OK;
+    }
+    case AWL_T_CFG_SET_STR: {   /* string config write: the two match lists */
+        std::string key, val;
+        if (AParcel_readString(in, &key, wl_str_alloc) != STATUS_OK ||
+            AParcel_readString(in, &val, wl_str_alloc) != STATUS_OK)
+            return STATUS_BAD_VALUE;
+        AParcel_writeInt32(out, cfg_set_str(key, val));
         return STATUS_OK;
     }
     case AWL_T_XR_POSE: {   /* head pose from the hosting Activity's IMU (ONEWAY) */

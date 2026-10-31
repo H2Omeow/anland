@@ -127,7 +127,24 @@ VR 支持不把显示交给容器。`vrcompositor` 依然画进一个普通窗�
 - 守护进程配置里 `sc_enabled = 0`、`xr_enabled = 1`；
 - 容器里跑 `xr/build.sh`，再 `xr/anland-steamvr install`、`xr/anland-steamvr start`。
 
-头部追踪是 3DoF（只有朝向），两个手柄其实是一个手柄映射到标准 OpenVR 配置，畸变在宿主侧做——几何、配置项与限制见 [docs/vr.md](docs/vr.md)。
+头部追踪是 3DoF（只有朝向），两个手柄其实是一个手柄映射到标准 OpenVR 配置，畸变在宿主侧做——几何、配置项与限制见 [docs/vr.md](docs/vr.md)。所有可调项（眼睛布局、刷新率、每眼尺寸、视场角、瞳距、渲染比例、畸变、色散、匹配标题）都在 **窗口设置 → VR** 里，还有一个 Quest 3S 预设；改动对正在运行的会话立即生效，不用重启。
+
+## 桌面：在一个窗口里跑嵌套合成器
+
+桌面合成器（KWin、Weston、Sway、Mutter）本身就是一个 Wayland 客户端，所以可以嵌套跑在 anland 的一个窗口里：它向宿主申请一个 surface，把整个桌面画进去。5.x 是另一条路——给每个 KWin 版本重写 `backend-anland` 插件；6.x 改成把宿主做成让客户端合成器可以信任的合成器：
+
+- `wl_output` v4（外加 `zxdg_output_manager_v1`），给出真实的屏幕尺寸、名字与刷新率；
+- `wp_presentation`，让客户端合成器知道它提交的那一帧**什么时候**真正上屏，而不是靠猜——KDE 的 mailbox 提交模型正是靠这个才不会堆积过期帧；
+- `zwp_linux_dmabuf_v1` v3，广告宿主能导入的格式/修饰符（`LINEAR`），导入不了时还有 shm 通路；
+- “桌面会话”标记（守护进程配置 `desktop_mode` + `desktop_match`）：匹配到的 toplevel 每次 configure 都带 `FULLSCREEN|MAXIMIZED`，并被钉在屏幕尺寸上，于是合成器把宿主当成显示器，而不是一个还要不断协商位置的浮动窗口管理器。
+
+```sh
+sc_enabled=0, desktop_mode=1        # /data/adb/modules/anland-awl/config.json
+bash anlandx/anland-session.sh &
+bash anlandx/anland-desktop         # 自动挑 kwin_wayland > weston > sway > mutter
+```
+
+广告了哪些协议、启动器怎么用、怎么验证（`wayland-info`、`logcat -s waylandbridge`）以及限制（没有 DRM/KMS、同时只有一个桌面、完整 Plasma 会话尚未在真机上验证）见 [docs/desktop.md](docs/desktop.md)。这两个开关也在 **窗口设置 → 桌面** 里。
 
 ## 相关项目
 

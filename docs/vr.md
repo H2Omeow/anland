@@ -48,8 +48,16 @@ Android                          host daemon                container
 
 ## Turning it on
 
-Daemon config, `/data/adb/modules/anland-awl/config.json` (edit, then
-`stop && start` the module service or reboot):
+Everything here is also on the phone: **Window Settings → VR**. The settings
+page reads the live values from the daemon over binder (`CFG_GET`/`CFG_SET`, plus
+the string transaction for the title match list), writes straight back into
+`config.json`, and applies immediately — the VR window gets a fresh `C_XR` and a
+repaint, so distortion tuning happens through the lenses while SteamVR runs.
+The Quest 3S preset button fills in the geometry numbers below.
+
+The config file still works, for scripting and for the first boot:
+`/data/adb/modules/anland-awl/config.json` (edit, then `stop && start` the
+module service or reboot):
 
 ```json
 {
