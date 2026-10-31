@@ -54,7 +54,7 @@
     <string name="xr_ipd">Interpupillary distance</string>
     <string name="xr_ipd_tip">Interpupillary distance:</string>
     <string name="xr_scale">Render scale</string>
-    <string name="xr_scale_tip">Render scale — eye resolution as a share of the panel (lower = faster, blurrier):</string>
+    <string name="xr_scale_tip">Render scale — per-eye resolution relative to the nominal size (1000 = 1.0x, lower = faster, blurrier):</string>
     <string name="xr_k1">Distortion k1</string>
     <string name="xr_k1_tip">Lens barrel distortion k1 (0 = none; raise until straight lines look straight through the lenses):</string>
     <string name="xr_k2">Distortion k2</string>
