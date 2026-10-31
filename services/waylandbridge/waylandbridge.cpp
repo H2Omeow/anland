@@ -210,6 +210,13 @@ enum {
                              * file is written unescaped, so a value containing
                              * a quote, a backslash or a control character is
                              * rejected instead of corrupting the config. */
+    AWL_T_XR_POSE2 = 22,  /* (id:i64 qx qy qz qw:f32 px py pz:f32
+                           *  wx wy wz:f32 sample_ns:i64 period_ns:i32) — as
+                           * T_XR_POSE but with angular velocity (rad/s), which
+                           * is what xr_predict extrapolates with. Sent by an
+                           * APK that knows its own rate; T_XR_POSE stays valid
+                           * so an older Activity keeps working (the daemon then
+                           * derives the rate by differencing quaternions). */
 };
 
 /* ---- window lifecycle events (daemon → subscriber apps, delivered over
@@ -1308,6 +1315,7 @@ static int g_xr_scale = 1000;     /* xr_scale: eye target scale, per-mille */
 static int g_xr_k1 = 0;           /* xr_k1/xr_k2: lens pre-distortion, per-mille */
 static int g_xr_k2 = 0;
 static int g_xr_ca = 0;           /* xr_ca: chromatic aberration, per-mille */
+static int g_xr_predict = 0;      /* xr_predict: ms of pose extrapolation, 0 = off */
 static char g_xr_match[256] = "vrcompositor,steamvr";
 static bool g_xr_started = false;
 /* Android panel the XR compositor targets (from query_display) */
@@ -1431,6 +1439,7 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "xr_scale") { *lo = 200; *hi = 2000; return true; }
     if (key == "xr_k1" || key == "xr_k2") { *lo = -1000; *hi = 2000; return true; }
     if (key == "xr_ca") { *lo = 0; *hi = 100; return true; }
+    if (key == "xr_predict") { *lo = 0; *hi = 120; return true; }
     /* desktop block (docs/desktop.md) */
     if (key == "desktop_mode") { *lo = 0; *hi = 1; return true; }
     return false;
@@ -1509,6 +1518,7 @@ static void cfg_save_locked(void) {
                "  \"xr_refresh\": %d,\n  \"xr_eye_w\": %d,\n  \"xr_eye_h\": %d,\n"
                "  \"xr_fov\": %d,\n  \"xr_ipd\": %d,\n  \"xr_scale\": %d,\n"
                "  \"xr_k1\": %d,\n  \"xr_k2\": %d,\n  \"xr_ca\": %d,\n"
+               "  \"xr_predict\": %d,\n"
                "  \"xr_match\": \"%s\",\n"
                "  \"desktop_mode\": %d,\n  \"desktop_match\": \"%s\",\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
@@ -1516,7 +1526,8 @@ static void cfg_save_locked(void) {
             g_cfg_xwayland_scale.load(std::memory_order_relaxed) ? 1 : 0,
             g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
             g_xr_enabled, g_xr_mode, g_xr_refresh, g_xr_eye_w, g_xr_eye_h,
-            g_xr_fov, g_xr_ipd, g_xr_scale, g_xr_k1, g_xr_k2, g_xr_ca, match,
+            g_xr_fov, g_xr_ipd, g_xr_scale, g_xr_k1, g_xr_k2, g_xr_ca, g_xr_predict,
+            match,
             g_desktop_mode, dmatch,
             rt, sl);
     if (fclose(f) != 0)
@@ -1570,6 +1581,7 @@ static void xr_configure_locked(void) {
     c.k1 = (float)g_xr_k1 / 1000.0f;
     c.k2 = (float)g_xr_k2 / 1000.0f;
     c.ca = (float)g_xr_ca / 1000.0f;
+    c.predict_ms = g_xr_predict;
     snprintf(c.match, sizeof(c.match), "%s", g_xr_match);
     if (!g_xr_started) {
         awl_xr_start(c, g_panel_w, g_panel_h, g_panel_hz);
@@ -1666,6 +1678,7 @@ static void cfg_load_and_apply(void) {
             {"xr_k1", -1000, 2000, &g_xr_k1},
             {"xr_k2", -1000, 2000, &g_xr_k2},
             {"xr_ca", 0, 100, &g_xr_ca},
+            {"xr_predict", 0, 120, &g_xr_predict},
         };
         for (const key_dom& k : xri) {
             int v = cfg_parse_int(buf, k.key);
@@ -1792,7 +1805,12 @@ static int cfg_set(const std::string& key, int32_t val) {
             else if (key == "xr_scale") g_xr_scale = val;
             else if (key == "xr_k1") g_xr_k1 = val;
             else if (key == "xr_k2") g_xr_k2 = val;
-            else g_xr_ca = val;
+            else if (key == "xr_predict") g_xr_predict = val;
+            else if (key == "xr_ca") g_xr_ca = val;
+            else {
+                LOGE("config set: unknown xr key '%s'", key.c_str());
+                return -1;
+            }
             xr_configure_locked();
             cfg_save_locked();
             LOGI("config set %s=%d (applied + persisted)", key.c_str(), val);
@@ -1959,7 +1977,7 @@ static bool caller_ok(transaction_code_t code) {
         code == AWL_T_ICON || code == AWL_T_CLOSE ||
         /* XR telemetry: same shape as A:INPUT (carries a window id, only
          * honoured for windows this daemon marked XR — see the handlers) */
-        code == AWL_T_XR_POSE || code == AWL_T_XR_INPUT)
+        code == AWL_T_XR_POSE || code == AWL_T_XR_INPUT || code == AWL_T_XR_POSE2)
         return true;
 
     uid_t u = AIBinder_getCallingUid();
@@ -2445,6 +2463,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         else if (key == "xr_k1") v = g_xr_k1;
         else if (key == "xr_k2") v = g_xr_k2;
         else if (key == "xr_ca") v = g_xr_ca;
+        else if (key == "xr_predict") v = g_xr_predict;
         else if (key == "desktop_mode") {
             std::lock_guard<std::mutex> lk(g_cfg_lock);
             v = g_desktop_mode;
@@ -2513,6 +2532,26 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         const uint64_t id = (uint64_t)id64;
         if (!window_ok(id) || !awl_xr_window_active(id)) return STATUS_PERMISSION_DENIED;
         awl_xr_set_input(ints, (size_t)n + 1);
+        return STATUS_OK;
+    }
+    case AWL_T_XR_POSE2: {   /* as T_XR_POSE + angular velocity (ONEWAY) */
+        int64_t id64 = 0, sample_ns = 0;
+        int32_t period = 0;
+        float q[4] = {0.0f, 0.0f, 0.0f, 1.0f}, p[3] = {0.0f, 0.0f, 0.0f};
+        float w[3] = {0.0f, 0.0f, 0.0f};
+        if (AParcel_readInt64(in, &id64) != STATUS_OK) return STATUS_BAD_VALUE;
+        for (int i = 0; i < 4; i++)
+            if (AParcel_readFloat(in, &q[i]) != STATUS_OK) return STATUS_BAD_VALUE;
+        for (int i = 0; i < 3; i++)
+            if (AParcel_readFloat(in, &p[i]) != STATUS_OK) return STATUS_BAD_VALUE;
+        for (int i = 0; i < 3; i++)
+            if (AParcel_readFloat(in, &w[i]) != STATUS_OK) return STATUS_BAD_VALUE;
+        if (AParcel_readInt64(in, &sample_ns) != STATUS_OK ||
+            AParcel_readInt32(in, &period) != STATUS_OK)
+            return STATUS_BAD_VALUE;
+        const uint64_t id = (uint64_t)id64;
+        if (!window_ok(id) || !awl_xr_window_active(id)) return STATUS_PERMISSION_DENIED;
+        awl_xr_set_pose_vel(q, p, w, (uint64_t)sample_ns, (uint32_t)(period > 0 ? period : 0));
         return STATUS_OK;
     }
     default:

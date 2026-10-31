@@ -2,6 +2,9 @@
  *
  * LOGI  lifecycle milestones (client/window creation and teardown, state
  *       transitions, one-shot init diagnostics) — kept in release builds
+ * LOGW  a configuration or peer behaviour we can live with but the user
+ *       should know about (one-shot; always kept) — e.g. an eye target whose
+ *       aspect no longer matches the window it is mapped onto
  * LOGE  errors and abnormal conditions — always kept
  * LOGD  hot-path tracing (event-loop dispatch: per-attach / per-commit /
  *       per-frame / per-buffer requests, render-thread buffer imports) —
@@ -23,6 +26,7 @@
 #endif
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  AWL_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  AWL_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, AWL_TAG, __VA_ARGS__)
 
 #ifdef AWL_LOG_DEBUG

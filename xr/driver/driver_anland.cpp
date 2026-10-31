@@ -312,6 +312,12 @@ public:
         pose.vecPosition[0] = p.pos[0];
         pose.vecPosition[1] = p.pos[1];
         pose.vecPosition[2] = p.pos[2];
+        /* Angular velocity lets the compositor extrapolate between samples
+         * (and SteamVR's own prediction uses it). Body frame ≈ tracking frame
+         * for small rates, which is all this is good for. */
+        pose.vecAngularVelocity[0] = p.ang_vel[0];
+        pose.vecAngularVelocity[1] = p.ang_vel[1];
+        pose.vecAngularVelocity[2] = p.ang_vel[2];
         /* the pose is already in the daemon's frame; sample_ns lets the
          * compositor extrapolate if it is late by a few ms */
         pose.poseTimeOffset = 0.0;
@@ -465,9 +471,29 @@ public:
         const anland_xr_pose& p = g_tracking.pose;
         const anland_xr_input& in = g_tracking.input;
         if (slot_ < (int)in.n && in.c[slot_].present) {
-            /* the pad is held in this hand: head pose + fixed shoulder offset,
-             * rotated into the head frame so it follows the gaze */
             const bool right = slot_ == 1;
+            /* A tracked provider (hand tracking bridge, or a future per-hand
+             * IMU) may fill the controller's own quat/pos in anland-xr-input;
+             * then the pose is real and the offset must not be added. Identity
+             * quaternion + zero position is the documented "untracked" value,
+             * which keeps the gamepad fallback below. */
+            const anland_xr_controller& c = in.c[slot_];
+            const double qn = fabs(c.quat[0]) + fabs(c.quat[1]) + fabs(c.quat[2]) +
+                              fabs(c.quat[3] - 1.0) + fabs(c.pos[0]) + fabs(c.pos[1]) +
+                              fabs(c.pos[2]);
+            if (qn > 1e-6) {
+                pose.qRotation.x = c.quat[0];
+                pose.qRotation.y = c.quat[1];
+                pose.qRotation.z = c.quat[2];
+                pose.qRotation.w = c.quat[3];
+                for (int i = 0; i < 3; i++) pose.vecPosition[i] = c.pos[i];
+                pose.poseIsValid = true;
+                pose.result = TrackingResult_Running_OK;
+                return pose;
+            }
+            /* untracked: the pad is held in this hand — head pose + fixed
+             * shoulder offset, rotated into the head frame so it follows the
+             * gaze */
             const double offset[3] = { right ? 0.18 : -0.18, -0.22, -0.32 };
             double rotated[3];
             qrotate(p.quat, offset, rotated);

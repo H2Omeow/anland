@@ -49,12 +49,30 @@ struct state {
     /* latest head pose (driver tracking space) */
     double q[4] = {0.0, 0.0, 0.0, 1.0};
     double pos[3] = {0.0, 0.0, 0.0};
+    double ang_vel[3] = {0.0, 0.0, 0.0};
     uint64_t pose_ns = 0;
     uint32_t period_ns = 0;
     bool pose_ok = false;
 
-    /* pose the previous XR frame was drawn with (reprojection reference) */
-    double last_q[4] = {0.0, 0.0, 0.0, 1.0};
+    /* last pose adopted from the optional 6DoF provider
+     * (anland-xr-pose-ext). While that file keeps updating, IMU poses from the
+     * Activity are dropped: mixing two 60/250 Hz sources into one quaternion
+     * would make the reprojection jitter instead of track. */
+    uint64_t ext_ns = 0;
+    bool ext_logged = false;
+
+    /* pose the previous XR frame of a given window was drawn with. Per window:
+     * two XR windows can be showing frames composed at different instants, and
+     * reprojecting one with the other's reference would double-rotate it. */
+    struct window_ref {
+        double q[4] = {0.0, 0.0, 0.0, 1.0};
+    };
+    std::map<uint64_t, window_ref> refs;
+
+    /* size of the XR window's surface; the eye target follows it when the
+     * config leaves xr_eye_w/h at 0 */
+    uint32_t win_w = 0, win_h = 0;
+    bool aspect_warned = false;
 
     /* last input snapshot as parsed from binder */
     anland_xr_input input;
@@ -70,8 +88,10 @@ state g;
 
 int g_pose_fd = -1;
 int g_input_fd = -1;
+int g_ext_fd = -1; /* optional 6DoF provider: anland-xr-pose-ext */
 anland_xr_pose_block* g_pose_map = nullptr;
 anland_xr_input_block* g_input_map = nullptr;
+anland_xr_pose_block* g_ext_map = nullptr;
 
 GLuint g_prog = 0;
 GLuint g_vao = 0;
@@ -129,6 +149,78 @@ void* map_block(const char* name, int* fd_out) {
     return p;
 }
 
+/* Read-only mapping for a block somebody else owns (the optional 6DoF
+ * provider). Absent file is not an error: 3DoF is the default. */
+void* map_block_ro(const char* name, int* fd_out) {
+    char path[512];
+    anland_xr_path(name, path, sizeof(path));
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return nullptr;
+    void* p = mmap(nullptr, ANLAND_XR_BLOCK_BYTES, PROT_READ, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) {
+        close(fd);
+        return nullptr;
+    }
+    *fd_out = fd;
+    LOGI("xr: %s mapped (external pose provider)", path);
+    return p;
+}
+
+/* Copy a pose block out with the seqlock handshake; false = torn/stale/empty. */
+bool read_pose_block(const anland_xr_pose_block* blk, anland_xr_pose* out) {
+    if (!blk) return false;
+    const volatile uint32_t* seq = (const volatile uint32_t*)&blk->seq;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        uint32_t before = anland_xr_seq_read(seq);
+        if (before & 1u) continue;
+        if (blk->magic != ANLAND_XR_POSE_MAGIC) return false;
+        memcpy(out, &blk->pose, sizeof(*out));
+        uint32_t after = anland_xr_seq_read(seq);
+        if (anland_xr_seq_stable(before, after)) return out->tracking != 0;
+    }
+    return false;
+}
+
+/* ------------------------------------------------------------------ */
+/* quaternion helpers beyond the damped ones below                     */
+/* ------------------------------------------------------------------ */
+
+/* q = exp(0.5 * axis_angle): small-angle rotation from a scaled axis. */
+void quat_from_scaled_axis(const double r[3], double out[4]) {
+    const double angle = sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+    if (angle < 1e-9) { out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1; return; }
+    const double s = sin(angle * 0.5) / angle;
+    out[0] = r[0] * s;
+    out[1] = r[1] * s;
+    out[2] = r[2] * s;
+    out[3] = cos(angle * 0.5);
+}
+
+/* Angular velocity (rad/s) between two orientations over dt seconds:
+ * dq = conj(q0) ⊗ q1 = exp(0.5 ω dt). */
+void quat_to_ang_vel(const double q0[4], const double q1[4], double dt, double out[3]) {
+    out[0] = out[1] = out[2] = 0.0;
+    if (dt <= 1e-6) return;
+    const double c0[4] = {-q0[0], -q0[1], -q0[2], q0[3]};
+    const double dq[4] = {
+        c0[3] * q1[0] + c0[0] * q1[3] + c0[1] * q1[2] - c0[2] * q1[1],
+        c0[3] * q1[1] - c0[0] * q1[2] + c0[1] * q1[3] + c0[2] * q1[0],
+        c0[3] * q1[2] + c0[0] * q1[1] - c0[1] * q1[0] + c0[2] * q1[3],
+        c0[3] * q1[3] - c0[0] * q1[0] - c0[1] * q1[1] - c0[2] * q1[2],
+    };
+    double w = dq[3];
+    if (w > 1.0) w = 1.0;
+    if (w < -1.0) w = -1.0;
+    const double angle = 2.0 * acos(w);
+    const double sn = sqrt(fmax(0.0, 1.0 - w * w));
+    if (sn < 1e-9) return; /* no rotation (or an exact half turn, unhelpful) */
+    const double k = angle / (sn * dt);
+    out[0] = dq[0] * k;
+    out[1] = dq[1] * k;
+    out[2] = dq[2] * k;
+}
+
+
 /* ------------------------------------------------------------------ */
 /* display geometry (host ↔ guest contract)                            */
 /* ------------------------------------------------------------------ */
@@ -143,10 +235,16 @@ void compute_display_locked(void) {
     d.mode = (uint32_t)(g.cfg.mode < 1 ? 1 : g.cfg.mode);
     d.refresh_hz = g.cfg.refresh > 0 ? (double)g.cfg.refresh : g.panel_hz;
 
+    /* What we map onto: the XR window's own surface when we know it (that is
+     * the render target), else the panel. Using the window keeps the declared
+     * eye pair aspect-identical to what the guest actually composed. */
+    const uint32_t src_w = g.win_w ? g.win_w : g.panel_w;
+    const uint32_t src_h = g.win_h ? g.win_h : g.panel_h;
+
     uint32_t ew = (uint32_t)g.cfg.eye_w > 0 ? (uint32_t)g.cfg.eye_w
-                                            : (d.mode == ANLAND_XR_MODE_SBS_H ? g.panel_w / 2 : g.panel_w);
+                                            : (d.mode == ANLAND_XR_MODE_SBS_H ? src_w / 2 : src_w);
     uint32_t eh = (uint32_t)g.cfg.eye_h > 0 ? (uint32_t)g.cfg.eye_h
-                                            : (d.mode == ANLAND_XR_MODE_SBS_V ? g.panel_h / 2 : g.panel_h);
+                                            : (d.mode == ANLAND_XR_MODE_SBS_V ? src_h / 2 : src_h);
     if (ew < 64) ew = 64;
     if (eh < 64) eh = 64;
     const double scale = g.cfg.render_scale > 0.1f ? (double)g.cfg.render_scale : 1.0;
@@ -171,6 +269,24 @@ void compute_display_locked(void) {
     d.ipd = g.cfg.ipd_mm > 20.0f && g.cfg.ipd_mm < 90.0f ? (double)g.cfg.ipd_mm / 1000.0 : 0.0635;
     d.render_scale = scale;
     d.version = ANLAND_XR_WIRE_VERSION;
+
+    /* The trap this guards: the guest composes a single image whose aspect is
+     * 2*eye_w : eye_h (SBS) or eye_w : 2*eye_h (SBS-V). If xr_eye_w/h was
+     * overridden so that no longer matches the window, every frame gets
+     * stretched instead of showing a resolution change. Say so once. */
+    if (g.win_w && g.win_h && !g.aspect_warned) {
+        double want = (double)d.eye_width / (double)d.eye_height;
+        if (d.mode == ANLAND_XR_MODE_SBS_H) want *= 2.0;
+        else if (d.mode == ANLAND_XR_MODE_SBS_V) want *= 0.5;
+        const double have = (double)g.win_w / (double)g.win_h;
+        if (fabs(want / have - 1.0) > 0.02) {
+            LOGW("xr: eye target %ux%u (mode %u) spans %.2f:1 but the window is %ux%u"
+                 " (%.2f:1) - the guest will stretch; leave xr_eye_w/h at 0 to follow"
+                 " the window",
+                 d.eye_width, d.eye_height, d.mode, want, g.win_w, g.win_h, have);
+            g.aspect_warned = true;
+        }
+    }
 }
 
 /* Write anland-xr-display (tmp + rename: the driver polls it, it must never
@@ -210,6 +326,9 @@ void publish_pose_locked(void) {
     for (int i = 0; i < 4; i++) p.quat[i] = g.q[i];
     for (int i = 0; i < 3; i++) p.pos[i] = g.pos[i];
     p.ipd = g.disp.ipd;
+    p.ang_vel[0] = g.ang_vel[0];
+    p.ang_vel[1] = g.ang_vel[1];
+    p.ang_vel[2] = g.ang_vel[2];
     p.tracking = 1;
     anland_xr_seq_end(seq);
 }
@@ -394,6 +513,9 @@ bool awl_xr_start(const awl_xr_config& cfg, uint32_t panel_w, uint32_t panel_h,
     }
     g_pose_map = (anland_xr_pose_block*)map_block(ANLAND_XR_POSE_FILE, &g_pose_fd);
     g_input_map = (anland_xr_input_block*)map_block(ANLAND_XR_INPUT_FILE, &g_input_fd);
+    /* Optional 6DoF provider (ARCore activity, OpenXR bridge): whoever writes
+     * this block owns position; the IMU session stays the fallback. */
+    g_ext_map = (anland_xr_pose_block*)map_block_ro(ANLAND_XR_POSE_EXT_FILE, &g_ext_fd);
     compute_display_locked();
     publish_display_locked();
     /* a pose block that was never written must not look like a valid pose */
@@ -476,20 +598,87 @@ bool awl_xr_pose_valid(void) {
     return g.pose_ok && now_ns() - g.pose_ns < kPoseFreshNs;
 }
 
-void awl_xr_set_pose(const float quat[4], const float pos[3], uint64_t sample_ns,
-                     uint32_t period_ns) {
+/* Adopt a fresher pose from the optional external provider (anland-xr-pose-ext).
+ * That file is the plug-in point for real 6DoF: an ARCore activity on a phone,
+ * or an OpenXR bridge on the headset, can publish position and orientation
+ * there and the daemon will prefer it over the IMU session's 3DoF. Caller holds
+ * g.lock. */
+void maybe_take_external_locked(void) {
+    if (!g_ext_map) return;
+    anland_xr_pose p;
+    if (!read_pose_block(g_ext_map, &p)) return;
+    if (p.sample_ns <= g.pose_ns) return;
+    double q[4] = {p.quat[0], p.quat[1], p.quat[2], p.quat[3]};
+    const double n = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (n < 1e-6) return;
+    for (int i = 0; i < 4; i++) q[i] /= n;
+
+    double prev[4];
+    for (int i = 0; i < 4; i++) prev[i] = g.q[i];
+    const double dt = (double)(p.sample_ns - g.pose_ns) * 1e-9;
+
+    for (int i = 0; i < 4; i++) g.q[i] = q[i];
+    for (int i = 0; i < 3; i++) g.pos[i] = p.pos[i];
+
+    const bool has_vel = fabs(p.ang_vel[0]) + fabs(p.ang_vel[1]) + fabs(p.ang_vel[2]) > 1e-9;
+    if (has_vel) {
+        for (int i = 0; i < 3; i++) g.ang_vel[i] = p.ang_vel[i];
+    } else if (dt > 1e-6) {
+        quat_to_ang_vel(prev, q, dt, g.ang_vel);
+    }
+    g.pose_ns = p.sample_ns;
+    g.period_ns = (uint32_t)p.period_ns;
+    g.pose_ok = true;
+    g.ext_ns = p.sample_ns;
+    if (!g.ext_logged) {
+        g.ext_logged = true;
+        LOGI("xr: external pose provider is live (%s) - IMU poses paused", ANLAND_XR_POSE_EXT_FILE);
+    }
+    publish_pose_locked();
+}
+
+/* True while an external provider is still delivering poses. */
+bool ext_fresh_locked(void) {
+    if (!g.ext_ns) return false;
+    const uint64_t now = now_ns();
+    return now > g.ext_ns && (now - g.ext_ns) < kPoseFreshNs;
+}
+
+void set_pose_common(const float quat[4], const float pos[3], const float ang_vel[3],
+                     uint64_t sample_ns, uint32_t period_ns) {
     std::lock_guard<std::mutex> lk(g.lock);
+    maybe_take_external_locked();
+    /* an external provider owns the pose while it is live */
+    if (ext_fresh_locked()) return;
     double q[4] = {quat[0], quat[1], quat[2], quat[3]};
     /* normalize (binder floats are not guaranteed unit length) */
     double n = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     if (n < 1e-6) { q[0] = q[1] = q[2] = 0.0; q[3] = 1.0; }
     else for (int i = 0; i < 4; i++) q[i] /= n;
+    const uint64_t ns = sample_ns ? sample_ns : now_ns();
+    if (ang_vel) {
+        for (int i = 0; i < 3; i++) g.ang_vel[i] = ang_vel[i];
+    } else {
+        double w[3];
+        quat_to_ang_vel(g.q, q, (double)(ns - g.pose_ns) * 1e-9, w);
+        for (int i = 0; i < 3; i++) g.ang_vel[i] = w[i];
+    }
     for (int i = 0; i < 4; i++) g.q[i] = q[i];
     for (int i = 0; i < 3; i++) g.pos[i] = pos ? pos[i] : 0.0;
-    g.pose_ns = sample_ns ? sample_ns : now_ns();
+    g.pose_ns = ns;
     g.period_ns = period_ns;
     g.pose_ok = true;
     publish_pose_locked();
+}
+
+void awl_xr_set_pose(const float quat[4], const float pos[3], uint64_t sample_ns,
+                     uint32_t period_ns) {
+    set_pose_common(quat, pos, nullptr, sample_ns, period_ns);
+}
+
+void awl_xr_set_pose_vel(const float quat[4], const float pos[3], const float ang_vel[3],
+                         uint64_t sample_ns, uint32_t period_ns) {
+    set_pose_common(quat, pos, ang_vel, sample_ns, period_ns);
 }
 
 void awl_xr_set_input(const int32_t* v, size_t n) {
@@ -523,12 +712,31 @@ void awl_xr_set_input(const int32_t* v, size_t n) {
     publish_input_locked();
 }
 
-void awl_xr_note_render(void) {
+void awl_xr_note_render(uint64_t id) {
     std::lock_guard<std::mutex> lk(g.lock);
-    for (int i = 0; i < 4; i++) g.last_q[i] = g.q[i];
+    state::window_ref& ref = g.refs[id];
+    for (int i = 0; i < 4; i++) ref.q[i] = g.q[i];
 }
 
-void awl_xr_draw(uint32_t tex, uint32_t bw, uint32_t bh, int vw, int vh,
+void awl_xr_note_window_size(uint64_t id, uint32_t w, uint32_t h) {
+    if (w < 64 || h < 64) return;
+    std::lock_guard<std::mutex> lk(g.lock);
+    if (g.win_w == w && g.win_h == h) return;
+    /* Only XR windows describe the render target; other windows' sizes are
+     * noise here. The width/height we keep is the largest XR window seen, so a
+     * transient small surface cannot shrink the contract. */
+    auto it = g.windows.find(id);
+    if (it == g.windows.end() || !it->second) return;
+    if (w * h < g.win_w * (uint64_t)g.win_h) return;
+    g.win_w = w;
+    g.win_h = h;
+    g.aspect_warned = false;
+    compute_display_locked();
+    publish_display_locked();
+    LOGI("xr: render target follows the window: %ux%u", w, h);
+}
+
+void awl_xr_draw(uint64_t id, uint32_t tex, uint32_t bw, uint32_t bh, int vw, int vh,
                  float u0, float v0, float su, float sv) {
     (void)bw;
     (void)bh;
@@ -541,10 +749,27 @@ void awl_xr_draw(uint32_t tex, uint32_t bw, uint32_t bh, int vw, int vh,
     bool fresh;
     {
         std::lock_guard<std::mutex> lk(g.lock);
+        maybe_take_external_locked();
         cfg = g.cfg;
         disp = g.disp;
-        for (int i = 0; i < 4; i++) { q_now[i] = g.q[i]; q_prev[i] = g.last_q[i]; }
-        fresh = g.pose_ok && now_ns() - g.pose_ns < kPoseFreshNs;
+        const uint64_t age = now_ns() - g.pose_ns;
+        fresh = g.pose_ok && age < kPoseFreshNs;
+
+        /* q_now is the pose of *this* window's last drawn frame (or the current
+         * pose when the window has not drawn yet), extrapolated forward: the
+         * head keeps moving between the sensor sample and the photon, so with
+         * xr_predict > 0 we add that gap back on top of the sample age. */
+        auto it = g.refs.find(id);
+        const double* ref = it != g.refs.end() ? it->second.q : g.q;
+        for (int i = 0; i < 4; i++) { q_prev[i] = ref[i]; q_now[i] = g.q[i]; }
+        if (fresh && cfg.predict_ms > 0) {
+            const double dt = (double)(age + (uint64_t)cfg.predict_ms * 1000000ull) * 1e-9;
+            const double r[3] = {g.ang_vel[0] * dt, g.ang_vel[1] * dt, g.ang_vel[2] * dt};
+            double step[4], out[4];
+            quat_from_scaled_axis(r, step);
+            quat_mul(g.q, step, out);
+            for (int i = 0; i < 4; i++) q_now[i] = out[i];
+        }
     }
 
     /* Reprojection: R = q_now ⊗ conj(q_prev) — the rotation the head made
@@ -583,18 +808,24 @@ void awl_xr_draw(uint32_t tex, uint32_t bw, uint32_t bh, int vw, int vh,
 
     {
         std::lock_guard<std::mutex> lk(g.lock);
-        for (int i = 0; i < 4; i++) g.last_q[i] = g.q[i];
+        /* Reference for the *next* frame of this window: the pose the guest's
+         * content actually corresponds to, i.e. the unextrapolated one. */
+        state::window_ref& ref = g.refs[id];
+        for (int i = 0; i < 4; i++) ref.q[i] = g.q[i];
     }
 }
 
 void awl_xr_shutdown(void) {
     if (g_pose_map) munmap(g_pose_map, ANLAND_XR_BLOCK_BYTES);
     if (g_input_map) munmap(g_input_map, ANLAND_XR_BLOCK_BYTES);
+    if (g_ext_map) munmap(g_ext_map, ANLAND_XR_BLOCK_BYTES);
     if (g_pose_fd >= 0) close(g_pose_fd);
     if (g_input_fd >= 0) close(g_input_fd);
+    if (g_ext_fd >= 0) close(g_ext_fd);
     g_pose_map = nullptr;
     g_input_map = nullptr;
-    g_pose_fd = g_input_fd = -1;
+    g_ext_map = nullptr;
+    g_pose_fd = g_input_fd = g_ext_fd = -1;
     if (g_vao) glDeleteVertexArrays(1, &g_vao);
     if (g_prog) glDeleteProgram(g_prog);
     g_vao = 0;

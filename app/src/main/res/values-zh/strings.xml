@@ -61,6 +61,10 @@
     <string name="xr_k2_tip">镜片桶形畸变 k2（二阶项, 少量即可）:</string>
     <string name="xr_ca">色散校正</string>
     <string name="xr_ca_tip">色散校正（0 = 关; 边缘出现红蓝镶边时加大）:</string>
+    <string name="xr_predict">姿态预测</string>
+    <string name="xr_predict_tip">姿态预测（毫秒, 在最新采样之外外推头部运动; 0 = 关）:</string>
+    <string name="xr_predict_off">关</string>
+    <string name="xr_ext_pose_tip">6DoF: 若 anland-xr-pose 旁边出现 anland-xr-pose-ext（由 ARCore/OpenXR 桥写入）, 其姿态会自动取代手机 IMU; 没有该文件时就是 3DoF 会话。</string>
     <string name="xr_match_tip">被当作 XR 窗口的窗口标题（逗号分隔, 不区分大小写）:</string>
     <string name="xr_preset_quest">Quest 3S 预设</string>
     <string name="cfg_str_apply">应用</string>

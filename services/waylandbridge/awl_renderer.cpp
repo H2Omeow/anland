@@ -398,8 +398,10 @@ static void render_frame(wl_window* w) {
 
         if (xr_on) {
             if (!xr_drew) {
-                awl_xr_draw(tex, bw, bh, vw, vh, lay[i].u0, lay[i].v0, lay[i].su, lay[i].sv);
-                awl_xr_note_render();   /* the pose this frame was composed with */
+                awl_xr_note_window_size(w->id, (uint32_t)vw, (uint32_t)vh);
+                awl_xr_draw(w->id, tex, bw, bh, vw, vh, lay[i].u0, lay[i].v0, lay[i].su,
+                            lay[i].sv);
+                awl_xr_note_render(w->id);   /* the pose this frame was composed with */
                 xr_drew = true;
                 drew = true;
             }

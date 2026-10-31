@@ -40,6 +40,7 @@ final class AwlClient {
     static final int T_CONNECT = 18;     /* (fd) → ok: wayland connection over binder */
     static final int T_XR_POSE = 19;  /* head pose from AwlXrSession (ONEWAY hot path, ~90 Hz) */
     static final int T_XR_INPUT = 20; /* controller state from AwlXrSession (ONEWAY, ~60 Hz) */
+    static final int T_XR_POSE2 = 22; /* as T_XR_POSE + angular velocity (rad/s) */
 
     /* Event codes on the event binder (match the daemon's AWL_E_*) */
     static final int E_CREATED = 1;
@@ -145,9 +146,20 @@ final class AwlClient {
 
     /** Head pose push (ONEWAY, ~90 Hz): quat = sensor-to-world rotation
      *  [x,y,z,w], pos in metres (0 for 3DoF), sampleNs = SensorEvent.timestamp,
-     *  periodNs = the sensor's reported period (0 when unknown). */
+     *  periodNs = the sensor's reported period (0 when unknown). No angular
+     *  velocity — the daemon derives it by differencing quaternions. */
     static void xrPose(long id, float qx, float qy, float qz, float qw,
                        float px, float py, float pz, long sampleNs, int periodNs) {
+        xrPose(id, qx, qy, qz, qw, px, py, pz, 0.0f, 0.0f, 0.0f, sampleNs, periodNs);
+    }
+
+    /** Same, with angular velocity in rad/s. Used when the Activity knows its
+     *  own rotation rate (a gyro sample, or a finite difference): the daemon's
+     *  xr_predict extrapolates poses with it, and the OpenVR driver publishes
+     *  it as w-velocity. */
+    static void xrPose(long id, float qx, float qy, float qz, float qw,
+                       float px, float py, float pz,
+                       float wx, float wy, float wz, long sampleNs, int periodNs) {
         IBinder b = get();
         if (b == null) return;
         Parcel d = Parcel.obtain();
@@ -156,9 +168,10 @@ final class AwlClient {
             d.writeLong(id);
             d.writeFloat(qx); d.writeFloat(qy); d.writeFloat(qz); d.writeFloat(qw);
             d.writeFloat(px); d.writeFloat(py); d.writeFloat(pz);
+            d.writeFloat(wx); d.writeFloat(wy); d.writeFloat(wz);
             d.writeLong(sampleNs);
             d.writeInt(periodNs);
-            b.transact(T_XR_POSE, d, null, IBinder.FLAG_ONEWAY);
+            b.transact(T_XR_POSE2, d, null, IBinder.FLAG_ONEWAY);
         } catch (Exception e) {
             s = null;
         } finally {

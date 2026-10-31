@@ -354,7 +354,13 @@ public class WlSettingsActivity extends Activity {
         sliderRow(R.string.xr_ca, "xr_ca", 0, 100, 0, 1,
                 v -> String.format(java.util.Locale.US, "%.2f", v / 1000.0));
 
+        note(R.string.xr_predict_tip);
+        sliderRow(R.string.xr_predict, "xr_predict", 0, 120, 0, 1,
+                v -> v == 0 ? getString(R.string.xr_predict_off) : v + " ms");
+
         questPresetRow();
+
+        note(R.string.xr_ext_pose_tip);
 
         textRow("xr_match", R.string.xr_match_tip);
 
@@ -567,6 +573,7 @@ public class WlSettingsActivity extends Activity {
             WlBinder.configSet("xr_k1", 220);
             WlBinder.configSet("xr_k2", 40);
             WlBinder.configSet("xr_ca", 10);
+            WlBinder.configSet("xr_predict", 20);
             recreate();   /* rebuild the page from the daemon's new values */
         });
         root.addView(b);

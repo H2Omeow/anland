@@ -61,6 +61,10 @@
     <string name="xr_k2_tip">Lens barrel distortion k2 (second order, only needs a touch):</string>
     <string name="xr_ca">Chromatic aberration</string>
     <string name="xr_ca_tip">Chromatic aberration correction (0 = off; raise if edges fringe red/blue):</string>
+    <string name="xr_predict">Pose prediction</string>
+    <string name="xr_predict_tip">Pose prediction (milliseconds of head motion extrapolated past the newest sample; 0 = off):</string>
+    <string name="xr_predict_off">off</string>
+    <string name="xr_ext_pose_tip">6DoF: if a file anland-xr-pose-ext appears next to anland-xr-pose (written by an ARCore/OpenXR bridge), its poses replace the phone IMU automatically. Without it the session is 3DoF.</string>
     <string name="xr_match_tip">Window titles treated as the XR window (comma separated, case-insensitive):</string>
     <string name="xr_preset_quest">Quest 3S preset</string>
     <string name="cfg_str_apply">Apply</string>

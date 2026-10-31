@@ -46,6 +46,12 @@
 #define ANLAND_XR_POSE_FILE "anland-xr-pose"
 #define ANLAND_XR_INPUT_FILE "anland-xr-input"
 
+/* Optional 6DoF input: an external provider (an ARCore activity on a phone, an
+ * OpenXR bridge on a headset) writes an anland_xr_pose_block here and the
+ * daemon prefers it over the IMU session whenever it is fresher. Absent file =
+ * plain 3DoF; nothing else changes. */
+#define ANLAND_XR_POSE_EXT_FILE "anland-xr-pose-ext"
+
 #define ANLAND_XR_POSE_MAGIC 0x41585031u  /* "AXP1" */
 #define ANLAND_XR_INPUT_MAGIC 0x41584931u /* "AXI1" */
 

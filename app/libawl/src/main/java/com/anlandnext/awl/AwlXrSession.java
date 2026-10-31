@@ -88,6 +88,12 @@ final class AwlXrSession implements SensorEventListener {
     private int periodNs;
     private long lastPoseNs;
 
+    /* rotation rate (rad/s, device frame) for xr_predict: differenced from the
+     * last quaternion we pushed, so it matches whatever produced the pose */
+    private final float[] w = {0f, 0f, 0f};
+    private final float[] qPrevP = {0f, 0f, 0f, 1f};
+    private long qPrevNs;
+
     /* controller state, index = slot */
     private final int[] buttons = new int[NC];
     private final float[] trigger = new float[NC];
@@ -198,7 +204,18 @@ final class AwlXrSession implements SensorEventListener {
         final long dt = nowNs - lastPoseNs;
         if (dt >= 4_000_000L) {   /* cap at 250 Hz: binder ONEWAY has to breathe */
             lastPoseNs = nowNs;
-            AwlClient.xrPose(windowId, q[0], q[1], q[2], q[3], 0f, 0f, 0f, nowNs, periodNs);
+            /* Rotation rate for the daemon's xr_predict: finite difference of the
+             * quaternion we are about to send. Doing it here (rather than
+             * forwarding the raw gyro) keeps the frames consistent — the pose
+             * may come from the fused rotation vector, not the gyro. */
+            if (qPrevNs != 0) {
+                final float sdt = (nowNs - qPrevNs) * 1e-9f;
+                if (sdt > 1e-4f && sdt < 0.2f) qangvel(qPrevP, q, sdt, w);
+            }
+            System.arraycopy(q, 0, qPrevP, 0, 4);
+            qPrevNs = nowNs;
+            AwlClient.xrPose(windowId, q[0], q[1], q[2], q[3], 0f, 0f, 0f,
+                    w[0], w[1], w[2], nowNs, periodNs);
         }
     }
 
@@ -343,6 +360,28 @@ final class AwlXrSession implements SensorEventListener {
         a[2] = w * dz + x * dy - y * dx + z * dw;
         a[3] = w * dw - x * dx - y * dy - z * dz;
         qnormalize(a);
+    }
+
+    /** ω (rad/s, body frame) from two orientations over dt:
+     *  dq = conj(q0) ⊗ q1 = exp(½·ω·dt). Leaves out untouched when the two
+     *  orientations are (nearly) equal — the rate is then simply unknown. */
+    private static void qangvel(float[] q0, float[] q1, float dt, float[] out) {
+        if (dt <= 1e-6f) return;
+        /* dq = conj(q0) ⊗ q1, xyz first */
+        final float ax = -q0[0], ay = -q0[1], az = -q0[2], aw = q0[3];
+        float dx = aw * q1[0] + ax * q1[3] + ay * q1[2] - az * q1[1];
+        float dy = aw * q1[1] - ax * q1[2] + ay * q1[3] + az * q1[0];
+        float dz = aw * q1[2] + ax * q1[1] - ay * q1[0] + az * q1[3];
+        float dw = aw * q1[3] - ax * q1[0] - ay * q1[1] - az * q1[2];
+        if (dw > 1f) dw = 1f;
+        if (dw < -1f) dw = -1f;
+        final float ang = 2f * (float) Math.acos(dw);
+        final float sn = (float) Math.sqrt(Math.max(0f, 1f - dw * dw));
+        if (sn < 1e-6f) return;   /* no rotation, or an exact half turn */
+        final float k = ang / (sn * dt);
+        out[0] = dx * k;
+        out[1] = dy * k;
+        out[2] = dz * k;
     }
 
     /** Nudge q so that its predicted "up" (device frame) aligns with the

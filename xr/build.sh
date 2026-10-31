@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build the container-side pieces of anland's VR support.
 #
-#   xr/build.sh              driver + Vulkan layer, into xr/build/
+#   xr/build.sh              driver + Vulkan layer + wire self test
 #   xr/build.sh --no-layer   driver only (no Vulkan headers on this box)
+#   xr/build.sh --test       host-arch self test only (no artifacts kept)
 #   OUT_DIR=/tmp/xr xr/build.sh
 #
 # The result is what xr/anland-steamvr install copies into SteamVR, so it has to
@@ -15,16 +16,34 @@ out=${OUT_DIR:-$here/build}
 cc=${CC:-cc}
 cxx=${CXX:-c++}
 want_layer=1
+test_only=0
 
 for arg in "$@"; do
     case "$arg" in
         --no-layer) want_layer=0 ;;
-        -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --test) test_only=1 ;;
+        -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
 
 mkdir -p "$out"
+
+# The wire format is the only part of the XR path that does not need hardware:
+# it is text (anland-xr-display) plus two seqlock blocks. Checking it here means
+# a change to anland_xr_wire.h fails on a laptop instead of on a headset.
+echo "==> wire self test ($(uname -m))"
+"$cc" -std=gnu11 -O1 -Wall -Wextra \
+    -I"$here/include" \
+    -o "$out/xr_wire_test" \
+    "$here/tools/xr_wire_test.c"
+"$out/xr_wire_test"
+
+if [ "$test_only" -eq 1 ]; then
+    echo
+    echo "==> --test: skipping driver + layer"
+    exit 0
+fi
 
 echo "==> driver (OpenVR server driver, $(uname -m))"
 # -fvisibility=hidden is fine: HmdDriverFactory carries an explicit
